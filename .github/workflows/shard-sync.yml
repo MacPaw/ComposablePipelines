@@ -1,0 +1,69 @@
+name: Shard sync
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  sync:
+    if: github.ref == 'refs/heads/main'
+    runs-on: macos-latest
+    environment: protected
+    outputs:
+      version: ${{ steps.parent.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get latest parent version tag
+        id: parent
+        uses: ./.github/actions/get-latest-parent-version
+        with:
+          shard_spec_path: ShardSpec.yml
+          token: ${{ secrets.ORG_GH_COCOA_TOKEN }}
+
+      - name: Sync from parent
+        id: sync_tool
+        uses: MacPaw/shard-tool@main
+        with:
+          command: sync
+          checkout_token: ${{ secrets.GITHUB_TOKEN }}
+          root_repo_token: ${{ secrets.ORG_GH_COCOA_TOKEN }}
+          git_user_name: ci-macpaw
+          git_user_email: ci-macpaw@macpaw.com
+          push_branch: main
+        env:
+          SYNC_DEPLOY_PRIVATE: ${{ secrets.SYNC_DEPLOY_PRIVATE }}
+          GPG_KEY: ${{ secrets.CI_MACPAW_COCOA_GPG }}
+
+      - name: Pull and push version tag
+        if: steps.sync_tool.outputs.updated == 'true'
+        env:
+          SYNC_DEPLOY_PRIVATE: ${{ secrets.SYNC_DEPLOY_PRIVATE }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SYNC_DEPLOY_PRIVATE" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no"
+          git remote set-url origin "git@github.com:${{ github.repository }}.git"
+          git pull origin main --ff-only
+          VERSION="${{ steps.parent.outputs.version }}"
+          git tag -f "$VERSION" || true
+          git push origin "$VERSION" --force || true
+
+      - name: Update cached latest tag
+        if: steps.sync_tool.outputs.updated == 'true'
+        run: |
+          mkdir -p .parent-version
+          echo "${{ steps.parent.outputs.version }}" > .parent-version/version
+
+      - name: Save parent-version cache
+        if: steps.sync_tool.outputs.updated == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .parent-version
+          key: parent-version
