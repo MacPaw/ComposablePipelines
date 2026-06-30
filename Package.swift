@@ -29,7 +29,6 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-syntax", from: "600.0.0"),
-        .package(url: "https://github.com/huggingface/AnyLanguageModel", from: "0.8.0"),
     ],
     targets: [
         // Codable wire-format AST. Foundation-only.
@@ -46,13 +45,12 @@ let package = Package(
             path: "PipelinePreviewMacro"
         ),
 
-        // Authoring DSL. Re-exports PipelineAST + AnyLanguageModel.
+        // Authoring DSL. Re-exports PipelineAST.
         .target(
             name: "PipelineDSL",
             dependencies: [
                 "PipelineAST",
                 "PipelinePreviewMacro",
-                .product(name: "AnyLanguageModel", package: "AnyLanguageModel"),
             ],
             path: "PipelineDSL"
         ),
@@ -85,6 +83,20 @@ let package = Package(
             path: "Examples"
         ),
 
+        // Foundation-only OpenAI-compatible Executor (non-product; demo + tests link it).
+        .target(
+            name: "OpenAIExecutor",
+            dependencies: ["ExecutionEngine", "PipelineAST"],
+            path: "OpenAIExecutor"
+        ),
+
+        // Runnable end-to-end demo: compile → walk → real OpenAI-compatible model.
+        .executableTarget(
+            name: "cp-demo",
+            dependencies: ["OpenAIExecutor", "ComposablePipelines"],
+            path: "Demo"
+        ),
+
         // MARK: - Tests
         .testTarget(
             name: "PipelineDSLTests",
@@ -100,6 +112,11 @@ let package = Package(
             name: "ExecutionEngineTests",
             dependencies: ["ExecutionEngine", "PipelineCompiler", "PipelineDSL", "PipelineAST", "Examples"],
             path: "Tests/ExecutionEngineTests"
+        ),
+        .testTarget(
+            name: "OpenAIExecutorTests",
+            dependencies: ["OpenAIExecutor", "ExecutionEngine", "PipelineAST"],
+            path: "Tests/OpenAIExecutorTests"
         ),
     ]
 )

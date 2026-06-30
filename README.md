@@ -50,7 +50,7 @@ re-execution; the executor decides what "run a model" actually means.
   client, decode and run it on a backend (or vice-versa). The same pipeline crosses the wire.
 - **Incremental re-execution.** State writes advance an epoch; on re-evaluation the walker
   skips the unchanged graph prefix instead of re-running completed work.
-- **Dependency-light.** Resolves on Foundation, swift-syntax, and AnyLanguageModel — no
+- **Dependency-light.** Resolves on Foundation and swift-syntax — no
   proprietary dependencies.
 
 ## Install
@@ -85,16 +85,14 @@ import ComposablePipelines
 
 struct EchoExecutor: Executor {
     func runModel(
-        instructions: ExecutionValue, tools: ExecutionValue, input: ExecutionValue,
-        outputTypeName: String, requirements: ModelSelectionRequirements?
+        config: ModelConfig,
+        arguments: ModelArguments,
+        onDelta: (@Sendable (String) -> Void)?
     ) async throws -> ExecutionValue {
-        let system = (try? JSONDecoder().decode(String.self, from: instructions)) ?? ""
-        let text   = (try? JSONDecoder().decode(String.self, from: input)) ?? ""
+        let system = arguments.systemPrompt
+        let text: String
+        if case .string(let message)? = arguments.message { text = message } else { text = "" }
         return try JSONEncoder().encode("[\(system)] \(text)")   // call a real model here
-    }
-
-    func runGuardrail(rules: [GuardrailRule]) async throws -> ExecutionValue {
-        try JSONEncoder().encode(true)                            // true == passes
     }
 }
 
@@ -110,6 +108,47 @@ print(try JSONDecoder().decode(String.self, from: result))
 
 A `MockExecutor` ships so the package runs out of the box — model steps return an empty
 placeholder and guardrails pass, which is enough to exercise graph shape in demos and tests.
+
+### Try it against a real model
+
+A ready-made `OpenAIChatExecutor` (Foundation-only) talks to any OpenAI-compatible endpoint.
+The bundled `cp-demo` executable runs a three-step **draft → revise → polish** pipeline on a
+topic you pass as an argument: it compiles the pipeline, walks it through the executor, streams
+the step/state events to stderr, and prints the finished paragraph to stdout.
+
+It is configured entirely through environment variables:
+
+| Variable | Required | Default | Notes |
+| --- | --- | --- | --- |
+| `OPENAI_API_KEY` | yes | — | Any non-empty value. Local servers usually ignore it — pass a dummy like `x`. |
+| `OPENAI_BASE_URL` | no | `https://api.openai.com/v1` | Point at any OpenAI-compatible endpoint. |
+| `OPENAI_MODEL` | no | `gpt-4o-mini` | Model id the endpoint serves. |
+
+**Against OpenAI:**
+
+```bash
+export OPENAI_API_KEY=sk-...
+swift run cp-demo "Swift result builders"
+```
+
+**Against a local server** (Ollama, LM Studio, mlx-lm, etc.) — these typically need no token, so
+pass a throwaway key to satisfy the required check:
+
+```bash
+OPENAI_API_KEY=x \
+OPENAI_BASE_URL=http://localhost:1977/v1 \
+OPENAI_MODEL=your-local-model \
+swift run cp-demo "Swift result builders"
+```
+
+> **Reasoning models:** the demo requests a generous `maxTokens` per step because reasoning
+> models spend tokens thinking before they emit any reply — a small token budget can truncate
+> them (`finish_reason: "length"`) before any content is produced. Local inference can also be
+> slow, so the executor uses a long request timeout. If a step returns no text, raise the
+> server's token limit.
+
+With no `OPENAI_API_KEY` set, `cp-demo` prints a hint and exits non-zero — handy for confirming
+the wiring without making a network call.
 
 ## Documentation
 
