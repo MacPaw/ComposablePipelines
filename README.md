@@ -120,6 +120,9 @@ placeholder and guardrails pass, which is enough to exercise graph shape in demo
   observation, errors and fallbacks.
 - [Architecture](docs/architecture.md) — AST → compiler → walker, epochs and incremental
   re-execution, and the wire-format AST.
+- [Examples/](Examples/) — runnable reference pipelines: map-reduce (`ForEach`), retrieval (`From`),
+  cost-aware model-tier routing (`requirements:` + early `return`), a self-healing retry loop, and a
+  tool-calling agent loop (`ModelTurn` + `ClientTask`).
 
 ## License
 
