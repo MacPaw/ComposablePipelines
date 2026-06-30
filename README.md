@@ -1,5 +1,7 @@
 # Composable Pipelines
 
+![Composable Pipelines](.github/header.png)
+
 A composable, runtime-agnostic stack for building AI pipelines in Swift: a SwiftUI-like
 DSL, a `Codable` AST, a compiler that lowers it to an execution graph, and an **observable
 walker** that orchestrates the run while you supply how each operation actually executes.
