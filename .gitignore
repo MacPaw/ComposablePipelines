@@ -1,7 +1,5 @@
-# Shard config — points at the internal monorepo; not for the public mirror.
-# CI provides its own ShardSpec.yml when syncing.
-ShardSpec.yml
-
-# Swift / SwiftPM build artifacts
+# Build artifacts (also applies to the public mirror, which is a copy of this dir).
 .build/
 .swiftpm/
+Package.resolved
+.DS_Store
