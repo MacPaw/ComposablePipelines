@@ -23,7 +23,7 @@ public actor CodingAgentAdapter: ChatAgent {
     private let maxTurns: Int
     private let historyLimit: Int
     private let contextTokens: Int
-    private let maxOutputTokens: Int
+    private let maxOutputTokens: Int?
     private let compaction: Bool
     private var history: [(user: String, assistant: String)] = []
 
@@ -34,7 +34,7 @@ public actor CodingAgentAdapter: ChatAgent {
         maxTurns: Int = 15,
         historyLimit: Int = 4,
         contextTokens: Int = 8_192,
-        maxOutputTokens: Int = 4_096,
+        maxOutputTokens: Int? = nil,
         compaction: Bool = true
     ) {
         self.name = name

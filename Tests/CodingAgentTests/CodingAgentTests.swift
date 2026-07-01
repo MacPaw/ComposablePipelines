@@ -184,6 +184,30 @@ final class CodingAgentLoopTests: XCTestCase {
         XCTAssertEqual(written, "hi from agent")
     }
 
+    // A tool call with malformed/truncated JSON arguments (e.g. the model hit its output cap
+    // mid-write) must not abort the run — the loop reports the error and keeps going.
+    func testAgentLoop_malformedToolArguments_doesNotCrash() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cp-agent-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let script: [ModelTurn] = [
+            // Truncated arguments — invalid JSON (unterminated string).
+            ModelTurn(toolCalls: [ToolCall(
+                id: "1", name: "write_file",
+                arguments: #"{"path":"a.txt","content":"<!DOCTYPE html>\#n<html"#)]),
+            ModelTurn(reply: "recovered"),
+        ]
+        let pipeline = CodingAgentPipeline(
+            task: "make a.txt", tools: defaultCodingTools(jail: PathJail(root: root)), maxTurns: 5)
+        let result = try await PipelineRunner.run(pipeline, executor: ScriptedExecutor(script))
+
+        XCTAssertEqual(try JSONDecoder().decode(String.self, from: result), "recovered")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("a.txt").path),
+                       "the malformed write must not have produced a file")
+    }
+
     // A turn that carries a preamble reply *and* a tool call is not final — the loop must continue
     // and return the later tool-free answer, not the preamble.
     func testAgentLoop_preambleWithToolCall_keepsLooping() async throws {
@@ -222,6 +246,20 @@ final class CodingAgentLoopTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(String.self, from: result), "recovered")
     }
 
+    // With no configured budget, the request carries no max_tokens — the server decides.
+    func testAgentLoop_omitsOutputCapByDefault() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cp-agent-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let executor = CapturingExecutor([ModelTurn(reply: "done")])
+        let pipeline = CodingAgentPipeline(
+            task: "x", tools: defaultCodingTools(jail: PathJail(root: root)), maxTurns: 3)
+        _ = try await PipelineRunner.run(pipeline, executor: executor)
+        XCTAssertNil(executor.maxTokens.first ?? nil, "no max_tokens should be sent when unset")
+    }
+
     // The configured per-response output budget reaches the model request.
     func testAgentLoop_usesConfiguredOutputBudget() async throws {
         let root = FileManager.default.temporaryDirectory
@@ -245,21 +283,22 @@ final class CodingAgentLoopTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
 
-        // Turn 1 writes a large file (its result balloons the transcript past the trigger); turn 2
-        // is the compaction summarizer (String output → "COMPACTED"); turn 3 is the final answer.
-        let bigContent = String(repeating: "x", count: 9_000)
+        // Seed a large file, then have the model read it — the read *result* is appended to the
+        // transcript and balloons it past the trigger; the next turn is the compaction summarizer
+        // ("COMPACTED"); then the final answer.
+        let bigContent = String(repeating: "x ", count: 5_000)   // ~10k chars
+        try bigContent.write(to: root.appendingPathComponent("big.txt"), atomically: true, encoding: .utf8)
         let script: [ModelTurn] = [
             ModelTurn(toolCalls: [ToolCall(
-                id: "1", name: "write_file",
-                arguments: #"{"path":"big.txt","content":"\#(bigContent)"}"#)]),
+                id: "1", name: "read_file", arguments: #"{"path":"big.txt"}"#)]),
             ModelTurn(reply: "COMPACTED"),
             ModelTurn(reply: "done"),
         ]
         let executor = CapturingExecutor(script)
-        // Small context (default 4096 output) → transcriptCap 8000, trigger 6000, so the ~9k write
+        // Small context (4096 output) → transcriptCap 8000, trigger 6000, so the ~10k read result
         // forces compaction on the next turn.
         let pipeline = CodingAgentPipeline(
-            task: "make big.txt", tools: defaultCodingTools(jail: PathJail(root: root)),
+            task: "read big.txt", tools: defaultCodingTools(jail: PathJail(root: root)),
             maxTurns: 8, contextTokens: 8_192, maxOutputTokens: 4_096)
         let result = try await PipelineRunner.run(pipeline, executor: executor)
 

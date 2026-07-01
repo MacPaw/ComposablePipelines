@@ -60,7 +60,7 @@ enum CPAgent {
 
         console.banner(
             agent: agent.name, model: config.model, dir: jail.root.path,
-            limits: "context \(caps.contextTokens) · output \(caps.maxOutputTokens)")
+            limits: "context \(caps.contextTokens) · output \(caps.maxOutputTokens.map(String.init) ?? "server default")")
 
         if !initialTask.isEmpty {
             console.userEcho(initialTask)
