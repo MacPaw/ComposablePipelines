@@ -8,6 +8,7 @@
 
 import Foundation
 import XCTest
+import PipelineAST
 @testable import Examples
 @testable import ExecutionEngine
 
@@ -17,7 +18,7 @@ final class SelfHealingExtractionPipelineTests: XCTestCase {
 
     /// Records each model prompt and returns invalid JSON for the first `failures` calls, then valid.
     private final class Model: @unchecked Sendable {
-        private let lock = NSLock()
+        private let lock = Lock()
         private(set) var prompts: [String] = []
         let failures: Int
         init(failures: Int) { self.failures = failures }

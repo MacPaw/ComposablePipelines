@@ -16,7 +16,7 @@ import PipelineAST
 
 /// Thread-safe capture for the `@Sendable` usage callback.
 private final class UsageBox: @unchecked Sendable {
-    private let lock = NSLock()
+    private let lock = Lock()
     private var value: Usage?
     var last: Usage? { lock.lock(); defer { lock.unlock() }; return value }
     func set(_ usage: Usage) { lock.lock(); value = usage; lock.unlock() }

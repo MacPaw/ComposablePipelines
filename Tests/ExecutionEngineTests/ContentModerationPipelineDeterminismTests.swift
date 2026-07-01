@@ -9,13 +9,14 @@
 import Foundation
 import XCTest
 import PipelineCompiler
+import PipelineAST
 import PipelineDSL
 @_spi(Internals) @testable import ExecutionEngine
 
 final class ContentModerationPipelineDeterminismTests: XCTestCase {
 
     private final class LockedEvents: @unchecked Sendable {
-        private let lock = NSLock()
+        private let lock = Lock()
         private var events: [ExecutionEvent] = []
 
         func append(_ event: ExecutionEvent) {
