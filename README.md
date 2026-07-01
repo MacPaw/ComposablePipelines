@@ -2,10 +2,19 @@
 
 ![Composable Pipelines](.github/header.png)
 
-A composable, runtime-agnostic stack for building AI pipelines in Swift: a SwiftUI-like
-**DSL**, a `Codable` **AST**, a **compiler** that lowers it to an execution graph, and an
-observable **walker** that orchestrates the run — while *you* supply how each operation
-actually executes.
+![Swift 5.9+](https://img.shields.io/badge/Swift-5.9%2B-F05138.svg)
+![Platforms: macOS 14+ | iOS 17+](https://img.shields.io/badge/platforms-macOS%2014%2B%20%7C%20iOS%2017%2B-1E88E5.svg)
+![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-43A047.svg)
+
+**An intermediate representation and compiler for AI pipelines in Swift.**
+
+Composable Pipelines separates an AI pipeline into three layers with well-defined boundaries: a
+declarative *front end* (result-builder surface syntax), a serializable *representation* (a
+`Codable` AST that serves as the intermediate representation), and a pluggable *backend*
+(execution). You author a pipeline declaratively; it **lowers** to the IR; a **compiler** analyzes
+the data dependencies and emits an execution graph; and an observable interpreter — the **walker**
+— runs that graph with incremental, epoch-based re-execution, delegating every model and tool step
+to a backend you supply through a single `Executor` interface.
 
 ```swift
 import ComposablePipelines
@@ -18,40 +27,62 @@ struct Summary: Pipeline {
     @State var summary = ""
 
     var body: some Pipeline {
-        Guardrail(rules: [.pii])                       // gate the input
-        $keyPoints.set {                               // step 1 → slot
-            Model<String, String>(
-                instructions: "Extract the 5 key points.",
-                input: Just(value: document)
-            )
+        $keyPoints.set {                                   // step 1 → slot
+            Model<String>()
+                .systemPrompt("Extract the 5 key points.")
+                .message(document)
         }
-        $summary.set {                                 // step 2 reads step 1
-            Model<String, String>(
-                instructions: "Write a concise summary from these points.",
-                input: $keyPoints.get()
-            )
+        $summary.set {                                     // step 2 reads step 1
+            Model<String>()
+                .systemPrompt("Write a concise summary from these points.")
+                .input { $keyPoints.get() }
         }
-        $summary.get()                                 // pipeline output
+        $summary.get()                                     // pipeline output
     }
 }
 ```
 
-You **author** a pipeline, **compile** it to a graph, and **walk** it with an executor of
-your choosing. The walker handles ordering, parallelism, state, and incremental
-re-execution; the executor decides what "run a model" actually means.
+No manual graph wiring, no callback pyramids: dependencies between steps are inferred from the
+`@State` slots they read and write.
+
+## How it works
+
+```mermaid
+flowchart LR
+    A["<b>Front end</b><br/>result-builder DSL"] --> B["<b>Lower</b><br/>Codable AST / IR"]
+    B --> C["<b>Compile</b><br/>optimize → execution graph"]
+    C --> D["<b>Interpret</b><br/>walker + incremental re-execution"]
+    D -- "model / tool step" --> E["<b>Backend</b><br/>your Executor"]
+    E -- "result" --> D
+```
+
+Three separable stages. **Lowering** turns the declarative body into a `Codable` AST — the
+intermediate representation. **Compilation** analyzes the data dependencies between `@State` slots
+and emits an execution graph, parallelizing independent steps. **Interpretation** walks that graph:
+the walker owns ordering, parallelism, state, and epoch-based incremental re-execution, while the
+`Executor` backend owns *how a step runs*. The layers never leak into each other — the IR is the
+contract between them.
+
+Composable Pipelines is the open authoring, IR, and compiler layer of **Elix**, MacPaw's
+proprietary AI engine. Elix supplies a production `Executor` backend for these pipelines;
+everything in this repository is the layer *above* that proprietary execution. For the design and
+rationale, see the technical note
+[**Composable AI Pipelines**](https://research.macpaw.com/publications/composable-ai-pipelines).
 
 ## Why
 
-- **SwiftUI-like authoring.** Declare *intent* with `@PipelineBuilder`, `@State`, and native
-  `if`/`switch`. No manual graph wiring.
-- **Bring your own runtime.** The walker never runs a model itself — it calls an `Executor`
-  you implement (a local model, a hosted API, a remote service, anything).
-- **The AST is the wire format.** A pipeline lowers to a `Codable` graph: encode it on a
-  client, decode and run it on a backend (or vice-versa). The same pipeline crosses the wire.
-- **Incremental re-execution.** State writes advance an epoch; on re-evaluation the walker
-  skips the unchanged graph prefix instead of re-running completed work.
-- **Dependency-light.** Resolves on Foundation and swift-syntax — no
-  proprietary dependencies.
+- **Declarative front end, inferred graph.** Author with `@PipelineBuilder`, `@State`, and native
+  `if`/`switch`; the execution graph is derived from the data dependencies between state slots, not
+  wired by hand.
+- **Bring your own runtime.** The walker never runs a model itself; it calls an `Executor` you
+  implement — a local model, a hosted API, a remote service, anything. `MockExecutor` ships for
+  tests, and a Foundation-only `OpenAIChatExecutor` talks to any OpenAI-compatible endpoint.
+- **The AST is the wire format.** A pipeline lowers to a `Codable` graph: author and compile it on
+  a client, decode and run it on a backend (or the reverse). The same pipeline crosses the wire.
+- **Incremental re-execution.** State writes advance an epoch; on re-evaluation the walker skips
+  the unchanged graph prefix instead of re-running completed work — which is what makes reactive
+  `While` loops and value-dependent branching cheap.
+- **Dependency-light.** Resolves on Foundation and swift-syntax. No proprietary dependencies.
 
 ## Install
 
@@ -72,9 +103,7 @@ import ComposablePipelines   // one import: DSL + AST + compiler + walker
 ```
 
 Prefer narrower imports? Depend on the individual products instead — `PipelineAST`,
-`PipelineDSL`, `PipelineCompiler`, `ExecutionEngine`.
-
-Requires Swift 5.9+, macOS 14+ / iOS 17+.
+`PipelineDSL`, `PipelineCompiler`, `ExecutionEngine`. Requires Swift 5.9+, macOS 14+ / iOS 17+.
 
 ## Run it end to end
 
@@ -106,82 +135,121 @@ let result = try await walker.run(graph: graph) { event in
 print(try JSONDecoder().decode(String.self, from: result))
 ```
 
-A `MockExecutor` ships so the package runs out of the box — model steps return an empty
-placeholder and guardrails pass, which is enough to exercise graph shape in demos and tests.
+`MockExecutor` ships so the package runs out of the box — model steps return an empty placeholder
+and guardrails pass, enough to exercise graph shape in demos and tests.
 
-### Try it against a real model
+### Against a real model
 
-A ready-made `OpenAIChatExecutor` (Foundation-only) talks to any OpenAI-compatible endpoint.
-The bundled `cp-demo` executable runs a three-step **draft → revise → polish** pipeline on a
-topic you pass as an argument: it compiles the pipeline, walks it through the executor, streams
-the step/state events to stderr, and prints the finished paragraph to stdout.
-
-It is configured entirely through environment variables:
+`OpenAIChatExecutor` (Foundation-only) talks to any OpenAI-compatible endpoint. The bundled
+`cp-demo` executable runs a three-step **draft → revise → polish** pipeline on a topic you pass in
+— compile, walk, stream the step/state events to stderr, print the finished paragraph. It's
+configured entirely through environment variables:
 
 | Variable | Required | Default | Notes |
 | --- | --- | --- | --- |
-| `OPENAI_API_KEY` | yes | — | Any non-empty value. Local servers usually ignore it — pass a dummy like `x`. |
-| `OPENAI_BASE_URL` | no | `https://api.openai.com/v1` | Point at any OpenAI-compatible endpoint. |
+| `OPENAI_API_KEY` | yes | — | Any non-empty value. Local servers usually ignore it — pass `x`. |
+| `OPENAI_BASE_URL` | no | `https://api.openai.com/v1` | Any OpenAI-compatible endpoint. |
 | `OPENAI_MODEL` | no | `gpt-4o-mini` | Model id the endpoint serves. |
 
-**Against OpenAI:**
-
 ```bash
+# OpenAI
 export OPENAI_API_KEY=sk-...
 swift run cp-demo "Swift result builders"
+
+# A local server (Ollama, LM Studio, mlx-lm, …) — pass a throwaway key
+OPENAI_API_KEY=x OPENAI_BASE_URL=http://localhost:1977/v1 OPENAI_MODEL=your-local-model \
+  swift run cp-demo "Swift result builders"
 ```
 
-**Against a local server** (Ollama, LM Studio, mlx-lm, etc.) — these typically need no token, so
-pass a throwaway key to satisfy the required check:
+> **Reasoning models** spend tokens thinking before they emit a reply, so a small budget can
+> truncate them before any content appears. The executor discovers the model's context window
+> (or reads `OPENAI_CONTEXT_TOKENS` / `OPENAI_MAX_OUTPUT_TOKENS`) and sizes budgets accordingly.
+
+## Worked example: a coding agent as a pipeline
+
+The DSL isn't only for linear flows. `cp-agent` is a real, tool-using coding agent — read, list,
+search, write, edit files and run `bash` — with a dark, interactive terminal chat UI. The entire
+agent loop *is* a pipeline, and it's a compact tour of how you engineer non-trivial pipelines.
 
 ```bash
-OPENAI_API_KEY=x \
-OPENAI_BASE_URL=http://localhost:1977/v1 \
-OPENAI_MODEL=your-local-model \
-swift run cp-demo "Swift result builders"
+OPENAI_API_KEY=x OPENAI_BASE_URL=http://localhost:1977/v1 OPENAI_MODEL=your-local-model \
+  swift run cp-agent ./scratch-dir
 ```
 
-> **Reasoning models:** the demo requests a generous `maxTokens` per step because reasoning
-> models spend tokens thinking before they emit any reply — a small token budget can truncate
-> them (`finish_reason: "length"`) before any content is produced. Local inference can also be
-> slow, so the executor uses a long request timeout. If a step returns no text, raise the
-> server's token limit.
+Here is the shape of the loop (abridged — the shipped
+[`CodingAgentPipeline`](CodingAgent/CodingAgentPipeline.swift) adds context compaction, stall
+recovery, and window-aware budgeting):
 
-With no `OPENAI_API_KEY` set, `cp-demo` prints a hint and exits non-zero — handy for confirming
-the wiring without making a network call.
+```swift
+struct CodingAgentPipeline: Pipeline {
+    typealias Output = String
+    let task: String
+    let tools: [any ModelTool]
 
-### A coding agent in the terminal
+    @State var transcript: String
+    @State var lastTurn = ModelTurn()
+    @State var reply = ""
+    @State var turns = 0
 
-`cp-agent` is a small, real coding agent built entirely on the DSL — a dark, interactive chat UI
-over a tool-calling agent loop. Point it at a working directory and give it a task:
-
-```bash
-export OPENAI_API_KEY=x                             # any value; local servers ignore it
-export OPENAI_BASE_URL=http://localhost:1977/v1     # any OpenAI-compatible endpoint
-swift run cp-agent ./scratch-dir
+    var body: some Pipeline {
+        // The agent loop is a reactive While: it re-reads committed state each iteration.
+        While(condition: { reply.isEmpty && turns < maxTurns }) {
+            // 1. Ask the model, advertising the available tools.
+            $lastTurn.set {
+                Model<ModelTurn>()
+                    .tools(tools.map(\.descriptor))
+                    .systemPrompt(systemPrompt)
+                    .input { $transcript.get() }
+            }
+            // 2. Run whatever tools the model called; append the results to the transcript.
+            $transcript.set {
+                ClientTask(input: $lastTurn) { turn in
+                    guard let calls = turn.toolCalls, !calls.isEmpty else { return transcript }
+                    var updated = transcript
+                    for call in calls {
+                        let output = try await ToolRegistry(tools).executeJSON(
+                            toolName: call.name, inputJSON: Data(call.arguments.utf8))
+                        updated += "\n[\(call.name)] " + String(decoding: output, as: UTF8.self)
+                    }
+                    return updated
+                }
+            }
+            // 3. A turn with tool calls keeps looping; a tool-free turn is the final answer.
+            $reply.set {
+                ClientTask(input: $lastTurn) { turn in
+                    (turn.toolCalls?.isEmpty == false) ? "" : (turn.reply ?? "")
+                }
+            }
+            $turns.set { ClientTask(input: $turns) { $0 + 1 } }
+        }
+        $reply.get()
+    }
+}
 ```
 
-It reads, lists, searches, writes, and edits files and runs `bash`, streaming its thinking, tool
-calls, and final answer to the terminal. What it demonstrates:
+**What this teaches about engineering pipelines:**
 
-- **The agent loop is just a pipeline.** [`CodingAgentPipeline`](CodingAgent/CodingAgentPipeline.swift)
-  is a `While` loop around `Model<ModelTurn>().tools(...)`, with a `ClientTask` dispatching the
-  model's `toolCalls` through a `ToolRegistry` and feeding results back — the same shape as the
-  [`ResearchAssistantPipeline`](Examples/ResearchAssistantPipeline.swift) example.
-- **Client-side tools.** The file/`bash` tools are `ModelTool`s (client-side, locally executed via
-  the registry). The framework also models agent-side `AgentTool`s — descriptor-only tools run by a
-  host runtime — but a standalone agent like this drives everything client-side.
-- **Swappable agent.** The UI depends only on a `ChatAgent` protocol
-  ([`ChatAgent`](CodingAgent/ChatAgent.swift)); `CodingAgentAdapter` wires the pipeline behind it,
-  so a different agent (another model, a remote service) is a drop-in replacement.
-- **Reactive execution.** The loop is driven by
-  [`PipelineRunner`](ComposablePipelines/PipelineRunner.swift), which re-lowers and re-compiles each
-  iteration so the `While` condition re-reads committed state — the public entry point for running
-  any `While`/branching pipeline.
+- **A loop is a primitive, not a special case.** The agent's turn loop is a `While` whose condition
+  reads ordinary `@State`. Because state writes advance epochs, the walker re-lowers and re-runs
+  only what changed each iteration — no bespoke agent runtime required.
+- **Tools are client work, expressed as `ClientTask`.** The model returns a `ModelTurn` carrying
+  `toolCalls`; a `ClientTask` dispatches them through a `ToolRegistry` and folds the results back
+  into state. Model steps and client steps compose in the same graph.
+- **Client-side vs. host-side tools.** The file/`bash` tools are `ModelTool`s — locally executed
+  through the registry. The framework also models `AgentTool`s — descriptor-only tools a host
+  runtime executes — so the same pipeline can target a local process or a remote agent.
+- **Cross-cutting concerns are sub-pipelines.** When the transcript approaches the model's context
+  window, a compaction *sub-pipeline* summarizes the older middle and rewrites state in place —
+  composed into the loop, not bolted onto it.
+- **Swap the whole agent behind a protocol.** The terminal UI depends only on a `ChatAgent`
+  ([`ChatAgent`](CodingAgent/ChatAgent.swift)); `CodingAgentAdapter` wires this pipeline behind it,
+  so another model or a remote service is a drop-in replacement.
+- **Reactive runs have one entry point.** [`PipelineRunner`](ComposablePipelines/PipelineRunner.swift)
+  drives any `While`/branching pipeline — re-lowering and recompiling as committed state evolves.
 
-> **Safety:** the tools are confined to the working directory (path-escape and symlink traversal are
-> rejected), but `bash` is an escape hatch — it runs with the directory as cwd yet is not otherwise
-> sandboxed. Point the agent at a scratch/throwaway directory and a model you trust.
+> **Safety:** file tools are confined to the working directory (path-escape and symlink traversal
+> are rejected). `bash` is an escape hatch — it runs with the directory as its cwd but is not
+> otherwise sandboxed, so point the agent at a scratch directory and a model you trust.
 
 ## Documentation
 
@@ -193,8 +261,9 @@ calls, and final answer to the terminal. What it demonstrates:
 - [Architecture](docs/architecture.md) — AST → compiler → walker, epochs and incremental
   re-execution, and the wire-format AST.
 - [Examples/](Examples/) — runnable reference pipelines: map-reduce (`ForEach`), retrieval (`From`),
-  cost-aware model-tier routing (`requirements:` + early `return`), a self-healing retry loop, and a
-  tool-calling agent loop (`ModelTurn` + `ClientTask`).
+  cost-aware model-tier routing, a self-healing retry loop, and a tool-calling agent loop.
+- [Technical note](https://research.macpaw.com/publications/composable-ai-pipelines) — the design
+  and rationale behind Composable AI Pipelines.
 
 ## License
 
