@@ -6,6 +6,7 @@
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
+import Foundation   // String.components / trimmingCharacters / CharacterSet (not implicit on Linux)
 import SwiftCompilerPlugin
 import SwiftSyntax
 import SwiftSyntaxBuilder

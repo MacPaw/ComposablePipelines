@@ -7,6 +7,10 @@
 //
 
 import XCTest
+import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking   // URLProtocol / URLSession live here on Linux
+#endif
 import PipelineAST
 @testable import OpenAIExecutor
 

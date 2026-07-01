@@ -2,8 +2,8 @@
 
 ![Composable Pipelines](.github/header.png)
 
-![Swift 5.9+](https://img.shields.io/badge/Swift-5.9%2B-F05138.svg)
-![Platforms: macOS 14+ | iOS 17+](https://img.shields.io/badge/platforms-macOS%2014%2B%20%7C%20iOS%2017%2B-1E88E5.svg)
+![Swift 6.1+](https://img.shields.io/badge/Swift-6.1%2B-F05138.svg)
+![Platforms: macOS 14+ | iOS 17+ | Linux](https://img.shields.io/badge/platforms-macOS%2014%2B%20%7C%20iOS%2017%2B%20%7C%20Linux-1E88E5.svg)
 ![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-43A047.svg)
 
 **An intermediate representation and compiler for AI pipelines in Swift.**
@@ -49,19 +49,28 @@ No manual graph wiring, no callback pyramids: dependencies between steps are inf
 
 ```mermaid
 flowchart LR
-    A["<b>Front end</b><br/>result-builder DSL"] --> B["<b>Lower</b><br/>Codable AST / IR"]
-    B --> C["<b>Compile</b><br/>optimize → execution graph"]
-    C --> D["<b>Interpret</b><br/>walker + incremental re-execution"]
-    D -- "model / tool step" --> E["<b>Backend</b><br/>your Executor"]
-    E -- "result" --> D
+    subgraph client["client · authoring (by default)"]
+        A["<b>Front end</b><br/>result-builder DSL"] --> B["<b>Lower</b><br/>Codable AST / IR"]
+    end
+    subgraph backend["backend · execution (by default)"]
+        C["<b>Compile</b><br/>→ execution graph"] --> D["<b>Interpret</b><br/>walker + incremental re-exec"]
+        D -- "model / tool step" --> E["<b>Executor</b>"]
+        E -- "result" --> D
+    end
+    B -- "serialize / ship AST" --> C
 ```
 
 Three separable stages. **Lowering** turns the declarative body into a `Codable` AST — the
 intermediate representation. **Compilation** analyzes the data dependencies between `@State` slots
 and emits an execution graph, parallelizing independent steps. **Interpretation** walks that graph:
 the walker owns ordering, parallelism, state, and epoch-based incremental re-execution, while the
-`Executor` backend owns *how a step runs*. The layers never leak into each other — the IR is the
-contract between them.
+`Executor` backend owns *how a step runs*.
+
+The `Codable` AST is the natural **client/backend boundary**: authoring and lowering typically run
+on a client, and everything after the AST — compilation, interpretation, and execution — on a
+backend that decodes it. But that boundary is a deployment choice, not a rule: run every stage in
+one process, or place the split wherever suits you. The layers never leak into each other; the AST
+is the contract between them.
 
 Composable Pipelines is the open authoring, IR, and compiler layer of **Elix**, MacPaw's
 proprietary AI engine. Elix supplies a production `Executor` backend for these pipelines;
@@ -77,8 +86,10 @@ rationale, see the technical note
 - **Bring your own runtime.** The walker never runs a model itself; it calls an `Executor` you
   implement — a local model, a hosted API, a remote service, anything. `MockExecutor` ships for
   tests, and a Foundation-only `OpenAIChatExecutor` talks to any OpenAI-compatible endpoint.
-- **The AST is the wire format.** A pipeline lowers to a `Codable` graph: author and compile it on
-  a client, decode and run it on a backend (or the reverse). The same pipeline crosses the wire.
+- **The AST is the wire format — and the client/backend seam.** A pipeline lowers to a `Codable`
+  AST on the client; a backend decodes it, compiles, and runs it. Everything after AST generation
+  is the backend's job by default — though you're free to place the split anywhere, or run it all
+  in one process. The same pipeline crosses the wire either way.
 - **Incremental re-execution.** State writes advance an epoch; on re-evaluation the walker skips
   the unchanged graph prefix instead of re-running completed work — which is what makes reactive
   `While` loops and value-dependent branching cheap.
@@ -103,7 +114,8 @@ import ComposablePipelines   // one import: DSL + AST + compiler + walker
 ```
 
 Prefer narrower imports? Depend on the individual products instead — `PipelineAST`,
-`PipelineDSL`, `PipelineCompiler`, `ExecutionEngine`. Requires Swift 5.9+, macOS 14+ / iOS 17+.
+`PipelineDSL`, `PipelineCompiler`, `ExecutionEngine`. Requires a Swift 6.1+ toolchain; runs on
+macOS 14+, iOS 17+, and Linux.
 
 ## Run it end to end
 
