@@ -45,8 +45,33 @@ struct Summary: Pipeline {
 No manual graph wiring, no callback pyramids: dependencies between steps are inferred from the
 `@State` slots they read and write.
 
-→ More patterns in [Examples/](Examples/): retrieval, map-reduce (`ForEach`), model-tier routing,
-a self-healing retry loop, and a tool-calling agent.
+Branch on a model's output with **native control flow** — the graph re-evaluates once the value
+lands:
+
+```swift
+struct Triage: Pipeline {
+    typealias Output = String
+    let ticket: String
+
+    @State var severity = ""
+    @State var reply = ""
+
+    var body: some Pipeline {
+        $severity.set {                                    // classify
+            Model<String>().systemPrompt("Reply 'high' or 'low'.").message(ticket)
+        }
+        if severity == "high" {                            // native `if`, re-evaluated on the result
+            $reply.set { Model<String>().systemPrompt("Draft an urgent reply.").message(ticket) }
+        } else {
+            $reply.set("Queued for standard handling.")    // a plain value is a step, too
+        }
+        $reply.get()                                       // pipeline output
+    }
+}
+```
+
+→ More patterns in the [examples guide](docs/examples.md): retrieval, map-reduce (`ForEach`),
+model-tier routing, a self-healing retry loop, and a tool-calling agent.
 
 ## How it works
 
@@ -171,8 +196,9 @@ configured entirely through environment variables:
 export OPENAI_API_KEY=sk-...
 swift run cp-demo "Swift result builders"
 
-# A local server (Ollama, LM Studio, mlx-lm, …) — pass a throwaway key
-OPENAI_API_KEY=x OPENAI_BASE_URL=http://localhost:1977/v1 OPENAI_MODEL=your-local-model \
+# Any OpenAI-compatible endpoint — local or remote (Ollama, LM Studio, mlx-lm, vLLM, …).
+# Pass a throwaway key for servers that don't require auth.
+OPENAI_API_KEY=x OPENAI_BASE_URL=http://localhost:1977/v1 OPENAI_MODEL=your-model \
   swift run cp-demo "Swift result builders"
 ```
 
@@ -279,8 +305,9 @@ struct CodingAgentPipeline: Pipeline {
   observation, errors and fallbacks.
 - [Architecture](docs/architecture.md) — AST → compiler → walker, epochs and incremental
   re-execution, and the wire-format AST.
-- [Examples/](Examples/) — runnable reference pipelines: map-reduce (`ForEach`), retrieval (`From`),
-  cost-aware model-tier routing, a self-healing retry loop, and a tool-calling agent loop.
+- [Examples](docs/examples.md) — a guided tour of the runnable reference pipelines: sequential flow,
+  parallel fan-out, map-reduce (`ForEach`), model-output branching, retrieval (`From`), a
+  self-healing retry loop, and a tool-calling agent loop. (Source in [`Examples/`](Examples/).)
 - [Technical note](https://research.macpaw.com/publications/composable-ai-pipelines) — the design
   and rationale behind Composable AI Pipelines.
 
