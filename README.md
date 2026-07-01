@@ -150,6 +150,20 @@ Prefer narrower imports? Depend on the individual products instead — `Pipeline
 `PipelineDSL`, `PipelineCompiler`, `ExecutionEngine`. Requires a Swift 6.1+ toolchain; runs on
 macOS 14+, iOS 17+, and Linux.
 
+## Build pipelines with your AI agent
+
+An agent **skill** aggregates the API, patterns, and common pitfalls of building pipelines, so your
+AI coding agent authors and debugs them correctly. Install it for the major agents:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MacPaw/ComposablePipelines/main/.claude/skills/install.sh | sh
+```
+
+The script installs every bundled skill into the skill directory of each supported agent it finds
+(Claude Code, Codex, opencode, Gemini CLI, Copilot CLI); set `SKILL_DIRS` to choose destinations.
+Each skill activates automatically when you work in a project that uses ComposablePipelines. Source:
+[`.claude/skills/`](.claude/skills/).
+
 ## Run it end to end
 
 The walker delegates each model/guardrail step to your `Executor`:
@@ -207,11 +221,11 @@ OPENAI_API_KEY=x OPENAI_BASE_URL=http://localhost:1977/v1 OPENAI_MODEL=your-mode
   swift run cp-demo "Swift result builders"
 ```
 
-> **Output limits.** By default the executor sends no `max_tokens`, letting the server use its own
-> limit (usually the model's full output) — so large single-turn writes aren't truncated. If your
-> server has a low default output cap and cuts replies short (common with reasoning models on some
-> local servers), set `OPENAI_MAX_OUTPUT_TOKENS`. The context window is discovered from the API,
-> `OPENAI_CONTEXT_TOKENS`, or a known-model default.
+> **Output limits.** The demo requests a generous `max_tokens` (the API-reported cap,
+> `OPENAI_MAX_OUTPUT_TOKENS`, or a default) so servers with a small default output cap — some local
+> mlx setups cap at 512 — don't truncate a reasoning model before it replies. If a large single
+> write is still cut short, raise `OPENAI_MAX_OUTPUT_TOKENS`. The context window is discovered from
+> the API, `OPENAI_CONTEXT_TOKENS`, or a known-model default.
 
 ## Worked example: a coding agent as a pipeline
 
@@ -300,20 +314,6 @@ struct CodingAgentPipeline: Pipeline {
 > **Safety:** file tools are confined to the working directory (path-escape and symlink traversal
 > are rejected). `bash` is an escape hatch — it runs with the directory as its cwd but is not
 > otherwise sandboxed, so point the agent at a scratch directory and a model you trust.
-
-## Build pipelines with your AI agent
-
-An agent **skill** aggregates the API, patterns, and common pitfalls of building pipelines, so your
-AI coding agent authors and debugs them correctly. Install it for the major agents:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/MacPaw/ComposablePipelines/main/.claude/skills/install.sh | sh
-```
-
-The script installs every bundled skill into the skill directory of each supported agent it finds
-(Claude Code, Codex, opencode, Gemini CLI, Copilot CLI); set `SKILL_DIRS` to choose destinations.
-Each skill activates automatically when you work in a project that uses ComposablePipelines. Source:
-[`.claude/skills/`](.claude/skills/).
 
 ## Documentation
 

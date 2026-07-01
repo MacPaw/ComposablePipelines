@@ -34,9 +34,11 @@ public struct ModelCapabilities: Sendable, Equatable {
         self.maxOutputTokens = maxOutputTokens
     }
 
-    /// Fallback when the API reports no limits: a conservative context window and no output cap
-    /// (the server decides). Set `OPENAI_CONTEXT_TOKENS` / `OPENAI_MAX_OUTPUT_TOKENS` to override.
-    public static let `default` = ModelCapabilities(contextTokens: 8_192, maxOutputTokens: nil)
+    /// Fallback when the API reports no limits: a conservative context window and a generous output
+    /// budget. The budget is sent as `max_tokens` so servers with a small default (e.g. some local
+    /// mlx setups default to 512) don't truncate a reasoning model before it emits anything. Raise
+    /// it with `OPENAI_MAX_OUTPUT_TOKENS`; the non-fatal truncation path handles larger single writes.
+    public static let `default` = ModelCapabilities(contextTokens: 8_192, maxOutputTokens: 8_192)
 
     /// Best-effort context window for well-known model families, used when neither the API nor the
     /// environment reports one. Deliberately small and conservative — many servers omit the real
@@ -151,10 +153,10 @@ public struct OpenAIChatExecutor: Executor {
             ?? config.contextTokens
             ?? ModelCapabilities.knownContextWindow(forModelID: config.model)
             ?? ModelCapabilities.default.contextTokens
-        // Output cap only when the API reports one or the environment sets it — otherwise nil, so we
-        // omit `max_tokens` and let the server use its (usually model-max) default.
-        let output = (api.maxOutputTokens ?? config.maxOutputTokens).map { min($0, context) }
-        return ModelCapabilities(contextTokens: context, maxOutputTokens: output)
+        // Output cap: API report → env hint → generous default (so low-default servers don't starve
+        // a reasoning model). Clamped to the context window.
+        let requested = api.maxOutputTokens ?? config.maxOutputTokens ?? ModelCapabilities.default.maxOutputTokens
+        return ModelCapabilities(contextTokens: context, maxOutputTokens: requested.map { min($0, context) })
     }
 
     /// Best-effort `GET /v1/models`: find this model's entry and read whatever capability fields the
