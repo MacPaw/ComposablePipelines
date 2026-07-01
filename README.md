@@ -45,6 +45,9 @@ struct Summary: Pipeline {
 No manual graph wiring, no callback pyramids: dependencies between steps are inferred from the
 `@State` slots they read and write.
 
+→ More patterns in [Examples/](Examples/): retrieval, map-reduce (`ForEach`), model-tier routing,
+a self-healing retry loop, and a tool-calling agent.
+
 ## How it works
 
 ```mermaid
