@@ -50,7 +50,7 @@ re-execution; the executor decides what "run a model" actually means.
   client, decode and run it on a backend (or vice-versa). The same pipeline crosses the wire.
 - **Incremental re-execution.** State writes advance an epoch; on re-evaluation the walker
   skips the unchanged graph prefix instead of re-running completed work.
-- **Dependency-light.** Resolves on Foundation, swift-syntax, and AnyLanguageModel — no
+- **Dependency-light.** Resolves on Foundation and swift-syntax — no
   proprietary dependencies.
 
 ## Install
@@ -85,16 +85,14 @@ import ComposablePipelines
 
 struct EchoExecutor: Executor {
     func runModel(
-        instructions: ExecutionValue, tools: ExecutionValue, input: ExecutionValue,
-        outputTypeName: String, requirements: ModelSelectionRequirements?
+        config: ModelConfig,
+        arguments: ModelArguments,
+        onDelta: (@Sendable (String) -> Void)?
     ) async throws -> ExecutionValue {
-        let system = (try? JSONDecoder().decode(String.self, from: instructions)) ?? ""
-        let text   = (try? JSONDecoder().decode(String.self, from: input)) ?? ""
+        let system = arguments.systemPrompt
+        let text: String
+        if case .string(let message)? = arguments.message { text = message } else { text = "" }
         return try JSONEncoder().encode("[\(system)] \(text)")   // call a real model here
-    }
-
-    func runGuardrail(rules: [GuardrailRule]) async throws -> ExecutionValue {
-        try JSONEncoder().encode(true)                            // true == passes
     }
 }
 
@@ -110,6 +108,80 @@ print(try JSONDecoder().decode(String.self, from: result))
 
 A `MockExecutor` ships so the package runs out of the box — model steps return an empty
 placeholder and guardrails pass, which is enough to exercise graph shape in demos and tests.
+
+### Try it against a real model
+
+A ready-made `OpenAIChatExecutor` (Foundation-only) talks to any OpenAI-compatible endpoint.
+The bundled `cp-demo` executable runs a three-step **draft → revise → polish** pipeline on a
+topic you pass as an argument: it compiles the pipeline, walks it through the executor, streams
+the step/state events to stderr, and prints the finished paragraph to stdout.
+
+It is configured entirely through environment variables:
+
+| Variable | Required | Default | Notes |
+| --- | --- | --- | --- |
+| `OPENAI_API_KEY` | yes | — | Any non-empty value. Local servers usually ignore it — pass a dummy like `x`. |
+| `OPENAI_BASE_URL` | no | `https://api.openai.com/v1` | Point at any OpenAI-compatible endpoint. |
+| `OPENAI_MODEL` | no | `gpt-4o-mini` | Model id the endpoint serves. |
+
+**Against OpenAI:**
+
+```bash
+export OPENAI_API_KEY=sk-...
+swift run cp-demo "Swift result builders"
+```
+
+**Against a local server** (Ollama, LM Studio, mlx-lm, etc.) — these typically need no token, so
+pass a throwaway key to satisfy the required check:
+
+```bash
+OPENAI_API_KEY=x \
+OPENAI_BASE_URL=http://localhost:1977/v1 \
+OPENAI_MODEL=your-local-model \
+swift run cp-demo "Swift result builders"
+```
+
+> **Reasoning models:** the demo requests a generous `maxTokens` per step because reasoning
+> models spend tokens thinking before they emit any reply — a small token budget can truncate
+> them (`finish_reason: "length"`) before any content is produced. Local inference can also be
+> slow, so the executor uses a long request timeout. If a step returns no text, raise the
+> server's token limit.
+
+With no `OPENAI_API_KEY` set, `cp-demo` prints a hint and exits non-zero — handy for confirming
+the wiring without making a network call.
+
+### A coding agent in the terminal
+
+`cp-agent` is a small, real coding agent built entirely on the DSL — a dark, interactive chat UI
+over a tool-calling agent loop. Point it at a working directory and give it a task:
+
+```bash
+export OPENAI_API_KEY=x                             # any value; local servers ignore it
+export OPENAI_BASE_URL=http://localhost:1977/v1     # any OpenAI-compatible endpoint
+swift run cp-agent ./scratch-dir
+```
+
+It reads, lists, searches, writes, and edits files and runs `bash`, streaming its thinking, tool
+calls, and final answer to the terminal. What it demonstrates:
+
+- **The agent loop is just a pipeline.** [`CodingAgentPipeline`](CodingAgent/CodingAgentPipeline.swift)
+  is a `While` loop around `Model<ModelTurn>().tools(...)`, with a `ClientTask` dispatching the
+  model's `toolCalls` through a `ToolRegistry` and feeding results back — the same shape as the
+  [`ResearchAssistantPipeline`](Examples/ResearchAssistantPipeline.swift) example.
+- **Client-side tools.** The file/`bash` tools are `ModelTool`s (client-side, locally executed via
+  the registry). The framework also models agent-side `AgentTool`s — descriptor-only tools run by a
+  host runtime — but a standalone agent like this drives everything client-side.
+- **Swappable agent.** The UI depends only on a `ChatAgent` protocol
+  ([`ChatAgent`](CodingAgent/ChatAgent.swift)); `CodingAgentAdapter` wires the pipeline behind it,
+  so a different agent (another model, a remote service) is a drop-in replacement.
+- **Reactive execution.** The loop is driven by
+  [`PipelineRunner`](ComposablePipelines/PipelineRunner.swift), which re-lowers and re-compiles each
+  iteration so the `While` condition re-reads committed state — the public entry point for running
+  any `While`/branching pipeline.
+
+> **Safety:** the tools are confined to the working directory (path-escape and symlink traversal are
+> rejected), but `bash` is an escape hatch — it runs with the directory as cwd yet is not otherwise
+> sandboxed. Point the agent at a scratch/throwaway directory and a model you trust.
 
 ## Documentation
 
