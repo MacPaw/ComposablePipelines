@@ -111,7 +111,7 @@ final class CodingToolsTests: XCTestCase {
 /// Returns a pre-scripted `ModelTurn` per call — no real model. Drives the full
 /// compile → walk → executor → tool-dispatch path deterministically.
 private final class ScriptedExecutor: Executor, @unchecked Sendable {
-    private let lock = NSLock()
+    private let lock = Lock()
     private var index = 0
     private let turns: [ModelTurn]
     init(_ turns: [ModelTurn]) { self.turns = turns }
@@ -132,7 +132,7 @@ private final class ScriptedExecutor: Executor, @unchecked Sendable {
 /// Like ``ScriptedExecutor`` but records the user message string of every turn, so tests can assert
 /// what context the pipeline actually sent to the model.
 private final class CapturingExecutor: Executor, @unchecked Sendable {
-    private let lock = NSLock()
+    private let lock = Lock()
     private var index = 0
     private let turns: [ModelTurn]
     private(set) var messages: [String] = []
@@ -328,7 +328,7 @@ final class CodingAgentLoopTests: XCTestCase {
 // MARK: - ChatAgent adapter
 
 private final class EventBox: @unchecked Sendable {
-    private let lock = NSLock()
+    private let lock = Lock()
     private(set) var toolNames: [String] = []
     private(set) var thinkingCount = 0
     func append(_ event: AgentEvent) {

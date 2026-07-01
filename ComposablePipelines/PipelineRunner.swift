@@ -96,7 +96,7 @@ public enum PipelineRunner {
 
     /// Buffers commit batches between flushes (drained inside the graphProvider).
     private final class PendingCommits: @unchecked Sendable {
-        private let lock = NSLock()
+        private let lock = Lock()
         private var commits: [StateUpdate] = []
 
         func append(_ new: [StateUpdate]) {
@@ -111,7 +111,7 @@ public enum PipelineRunner {
 
     /// Accumulates client-action closures across re-lowerings (taskIDs may change per pass).
     private final class ActionRegistry: @unchecked Sendable {
-        private let lock = NSLock()
+        private let lock = Lock()
         private var actions: [UUID: PipelineClientAction] = [:]
 
         func merge(_ new: [UUID: PipelineClientAction]) {

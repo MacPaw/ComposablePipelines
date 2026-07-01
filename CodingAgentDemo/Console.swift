@@ -7,11 +7,12 @@
 //
 
 import Foundation
+import ComposablePipelines
 
 /// Serializes all stdout rendering behind a lock so the animated spinner and event-driven lines
 /// never interleave mid-write. Permanent lines are printed above a transient, animated status line.
 final class Console: @unchecked Sendable {
-    private let lock = NSLock()
+    private let lock = Lock()
     private let theme: Theme
     private var status: String?
     private var frame = 0

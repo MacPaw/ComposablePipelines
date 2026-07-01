@@ -18,7 +18,7 @@ final class CodeReviewPipelineTests: XCTestCase {
 
     /// Records every model call so tests can assert the requested `requirements`.
     private final class CallLog: @unchecked Sendable {
-        private let lock = NSLock()
+        private let lock = Lock()
         private(set) var calls: [ScriptedExecutor.ModelCall] = []
         func record(_ call: ScriptedExecutor.ModelCall) {
             lock.lock(); calls.append(call); lock.unlock()

@@ -7,13 +7,13 @@
 //
 
 #if !canImport(os)
-import Foundation
+import PipelineAST
 
 /// Portable stand-in for the slice of `os.OSAllocatedUnfairLock` this module uses on platforms
 /// without the `os` module (Linux). Same shape as the Apple type for the `initialState:` +
-/// `withLock` API; backed by `NSLock`.
+/// `withLock` API; backed by ``Lock`` (a `pthread_mutex` on Linux).
 final class OSAllocatedUnfairLock<State>: @unchecked Sendable {
-    private let lock = NSLock()
+    private let lock = Lock()
     private var state: State
 
     init(initialState: State) { self.state = initialState }

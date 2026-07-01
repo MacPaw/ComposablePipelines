@@ -109,7 +109,7 @@ extension ScriptedExecutor {
 
     /// Thread-safe call counter backing ``sequence(_:)`` (model steps can run concurrently).
     private final class Cursor: @unchecked Sendable {
-        private let lock = NSLock()
+        private let lock = Lock()
         private let values: [ExecutionValue]
         private var index = 0
 

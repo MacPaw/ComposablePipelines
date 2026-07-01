@@ -7,13 +7,14 @@
 //
 
 import Foundation
+import PipelineAST
 
 // Internal on purpose: kept out of the public surface so it never collides with a consumer's own
 // `Synchronized` (e.g. AtomicKit's) when they `import PipelineDSL`.
 @propertyWrapper
 final class Synchronized<Value>: @unchecked Sendable {
 
-    private let lock = NSLock()
+    private let lock = Lock()
     private var value: Value
 
     init(wrappedValue: Value) {
