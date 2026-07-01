@@ -16,6 +16,11 @@ the data dependencies and emits an execution graph; and an observable interprete
 — runs that graph with incremental, epoch-based re-execution, delegating every model and tool step
 to a backend you supply through a single `Executor` interface.
 
+The same primitives scale from a two-step summary to a full **tool-calling agent**: loops, tools,
+and branching are ordinary pipeline constructs. See the
+[coding-agent worked example](#worked-example-a-coding-agent-as-a-pipeline) — a real agent built
+entirely on this DSL.
+
 ```swift
 import ComposablePipelines
 
@@ -295,6 +300,20 @@ struct CodingAgentPipeline: Pipeline {
 > **Safety:** file tools are confined to the working directory (path-escape and symlink traversal
 > are rejected). `bash` is an escape hatch — it runs with the directory as its cwd but is not
 > otherwise sandboxed, so point the agent at a scratch directory and a model you trust.
+
+## Build pipelines with your AI agent
+
+An agent **skill** aggregates the API, patterns, and common pitfalls of building pipelines, so your
+AI coding agent authors and debugs them correctly. Install it for the major agents:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MacPaw/ComposablePipelines/main/.claude/skills/install.sh | sh
+```
+
+The script installs every bundled skill into the skill directory of each supported agent it finds
+(Claude Code, Codex, opencode, Gemini CLI, Copilot CLI); set `SKILL_DIRS` to choose destinations.
+Each skill activates automatically when you work in a project that uses ComposablePipelines. Source:
+[`.claude/skills/`](.claude/skills/).
 
 ## Documentation
 
