@@ -7,7 +7,9 @@
 //
 
 import Foundation
+#if canImport(os)
 import struct os.OSAllocatedUnfairLock
+#endif
 @_spi(Internals) import PipelineCompiler
 import PipelineAST
 

@@ -461,11 +461,11 @@ final class PipelineCompilerTests: XCTestCase {
 
             var best = Double.infinity
             for _ in 0..<3 {
-                let start = CFAbsoluteTimeGetCurrent()
+                let start = Date().timeIntervalSinceReferenceDate
                 for _ in 0..<iterations {
                     _ = compiler.compile(graph)
                 }
-                let elapsed = CFAbsoluteTimeGetCurrent() - start
+                let elapsed = Date().timeIntervalSinceReferenceDate - start
                 best = min(best, elapsed)
             }
             let avgMs = (best / Double(iterations)) * 1_000

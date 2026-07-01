@@ -7,6 +7,9 @@
 //
 
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking   // URLSession / URLRequest live here on Linux
+#endif
 import PipelineAST
 import ExecutionEngine
 
