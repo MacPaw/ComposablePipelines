@@ -11,9 +11,9 @@ import Foundation
 /// Open progress reporter the walker binds for the duration of a pass.
 ///
 /// The walker turns reported fractions into `resourceProgressUpdated` execution events. A backend
-/// that loads models reports progress through `current`; the proprietary executor bridges its own
-/// resource-load progress into this reporter. This is the open replacement for the walker's former
-/// dependency on `ElixResources.ResourceProgress` — progress is observation, which stays open.
+/// that loads models reports progress through `current`; the host's executor bridges its own
+/// resource-load progress into this reporter. This keeps progress reporting — which is observation
+/// — open, without the walker depending on any host resource types.
 public final class ExecutionProgressReporter: @unchecked Sendable {
 
     /// Ambient reporter for the current pass, bound by `PipelineWalker.run`.

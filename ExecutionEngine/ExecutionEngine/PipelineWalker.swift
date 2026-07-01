@@ -73,7 +73,7 @@ public final class PipelineWalker {
     ) {
         self.executor = executor
         self.maxReexecutionDepth = maxReexecutionDepth
-        self.logger = logger.subLogger("elix-engine")
+        self.logger = logger.subLogger("engine")
         self.observer = observer
     }
 

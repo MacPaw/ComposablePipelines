@@ -10,8 +10,8 @@ import Foundation
 
 /// Contract for any source of ``ContextItem``s.
 ///
-/// Conformers are written by clients (Mnemos, long-term memory, a Slack
-/// integration, a hardcoded fixture for tests, …). The toolchain ships none.
+/// Conformers are written by clients (long-term memory, a Slack integration,
+/// a hardcoded fixture for tests, …). The toolchain ships none.
 ///
 /// A provider is plugged into a pipeline via the `From(provider:)` DSL
 /// operator; the engine calls ``fetch(query:)`` when the operator runs.

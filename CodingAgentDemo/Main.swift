@@ -45,11 +45,22 @@ enum CPAgent {
         }
 
         let jail = PathJail(root: dir)
+        // Report each turn's server-side context usage into the live gauge.
+        let executor = OpenAIChatExecutor(config: config, onUsage: { usage in
+            console.reportContextTokens(usage.promptTokens)
+        })
+        // Ask the server what the model can handle (context window / output cap), falling back to
+        // OPENAI_CONTEXT_TOKENS / OPENAI_MAX_OUTPUT_TOKENS, then defaults.
+        let caps = await executor.fetchCapabilities()
+        console.setContextWindow(caps.contextTokens)
         // The one line to change to swap in a different agent.
         let agent: any ChatAgent = CodingAgentAdapter(
-            executor: OpenAIChatExecutor(config: config), jail: jail)
+            executor: executor, jail: jail,
+            contextTokens: caps.contextTokens, maxOutputTokens: caps.maxOutputTokens)
 
-        console.banner(agent: agent.name, model: config.model, dir: jail.root.path)
+        console.banner(
+            agent: agent.name, model: config.model, dir: jail.root.path,
+            limits: "context \(caps.contextTokens) · output \(caps.maxOutputTokens)")
 
         if !initialTask.isEmpty {
             console.userEcho(initialTask)

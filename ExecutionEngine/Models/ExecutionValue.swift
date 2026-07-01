@@ -20,7 +20,7 @@ extension Data {
     /// for operations whose output is not yet implemented.
     /// Matches `WalkerState`'s sentinel in `ComposablePipelines`.
     ///
-    /// Exposed via `@_spi(Internals)` so a proprietary executor / tests can assert the same
-    /// sentinel across the `.package(path:)` boundary without widening the clean public API.
+    /// Exposed via `@_spi(Internals)` so a host executor / tests can assert the same sentinel
+    /// across the module boundary without widening the clean public API.
     @_spi(Internals) public static let emptyJSON = Data("\"\"".utf8)
 }
