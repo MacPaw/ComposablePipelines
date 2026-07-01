@@ -15,8 +15,35 @@ final class Console: @unchecked Sendable {
     private let theme: Theme
     private var status: String?
     private var frame = 0
+    private var contextWindow: Int?
+    private var contextGauge: String?
 
     init(theme: Theme) { self.theme = theme }
+
+    // MARK: - Context usage
+
+    /// The model's context window, used to render the live usage gauge.
+    func setContextWindow(_ tokens: Int) {
+        lock.lock(); contextWindow = tokens; lock.unlock()
+    }
+
+    /// Report the context (prompt) tokens the server consumed on the latest turn; shown live in the
+    /// status line as `ctx used/window`.
+    func reportContextTokens(_ used: Int) {
+        lock.lock(); defer { lock.unlock() }
+        if let window = contextWindow {
+            contextGauge = "ctx \(Self.humanTokens(used))/\(Self.humanTokens(window))"
+        } else {
+            contextGauge = "ctx \(Self.humanTokens(used))"
+        }
+        if theme.enabled, status != nil { renderStatusLocked() }
+    }
+
+    private static func humanTokens(_ n: Int) -> String {
+        if n >= 1_000_000 { return String(format: "%.1fM", Double(n) / 1_000_000) }
+        if n >= 1_000 { return String(format: "%.0fk", Double(n) / 1_000) }
+        return "\(n)"
+    }
 
     private func out(_ s: String) { FileHandle.standardOutput.write(Data(s.utf8)) }
 
@@ -46,7 +73,11 @@ final class Console: @unchecked Sendable {
     private func renderStatusLocked() {
         guard let text = status else { return }
         let f = theme.spinnerFrames[frame % theme.spinnerFrames.count]
-        out("\r" + theme.clearLine + theme.paint("\(f) \(text)", theme.mauve, theme.dim))
+        var line = theme.paint("\(f) \(text)", theme.mauve, theme.dim)
+        if let gauge = contextGauge {
+            line += theme.paint("  ·  \(gauge)", theme.faint)
+        }
+        out("\r" + theme.clearLine + line)
     }
 
     // MARK: - Permanent lines
@@ -61,11 +92,12 @@ final class Console: @unchecked Sendable {
 
     // MARK: - Semantic rendering
 
-    func banner(agent: String, model: String, dir: String) {
+    func banner(agent: String, model: String, dir: String, limits: String) {
         let a = theme.accent
         line()
         line(theme.paint("  ◆ cp-agent", a, theme.bold) + theme.paint("  ·  \(agent)", theme.subtle))
         line(theme.paint("  model ", theme.faint) + theme.paint(model, theme.subtle))
+        line(theme.paint("  limit ", theme.faint) + theme.paint(limits, theme.subtle))
         line(theme.paint("  dir   ", theme.faint) + theme.paint(dir, theme.subtle))
         line(theme.paint("  ────────────────────────────────────────────", theme.faint))
         line(theme.paint("  type a task · ", theme.faint) + theme.paint("exit", theme.subtle) + theme.paint(" to quit", theme.faint))

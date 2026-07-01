@@ -136,6 +136,7 @@ private final class CapturingExecutor: Executor, @unchecked Sendable {
     private var index = 0
     private let turns: [ModelTurn]
     private(set) var messages: [String] = []
+    private(set) var maxTokens: [Int?] = []
     init(_ turns: [ModelTurn]) { self.turns = turns }
 
     func runModel(
@@ -145,10 +146,16 @@ private final class CapturingExecutor: Executor, @unchecked Sendable {
     ) async throws -> ExecutionValue {
         lock.lock()
         if case .string(let text)? = arguments.message { messages.append(text) }
+        maxTokens.append(arguments.maxTokens)
         let turn = turns[Swift.min(index, turns.count - 1)]
         index += 1
         lock.unlock()
-        return try JSONEncoder().encode(turn)
+        // Honor the requested output type: ModelTurn steps get the scripted turn; String steps
+        // (e.g. the compaction summarizer) get its reply text.
+        if config.outputTypeName == ModelTurn.outputTypeName {
+            return try JSONEncoder().encode(turn)
+        }
+        return try JSONEncoder().encode(turn.reply ?? "")
     }
 }
 
@@ -213,6 +220,54 @@ final class CodingAgentLoopTests: XCTestCase {
             task: "x", tools: defaultCodingTools(jail: PathJail(root: root)), maxTurns: 5)
         let result = try await PipelineRunner.run(pipeline, executor: ScriptedExecutor(script))
         XCTAssertEqual(try JSONDecoder().decode(String.self, from: result), "recovered")
+    }
+
+    // The configured per-response output budget reaches the model request.
+    func testAgentLoop_usesConfiguredOutputBudget() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cp-agent-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let executor = CapturingExecutor([ModelTurn(reply: "done")])
+        let pipeline = CodingAgentPipeline(
+            task: "x", tools: defaultCodingTools(jail: PathJail(root: root)),
+            maxTurns: 3, contextTokens: 262_144, maxOutputTokens: 12_345)
+        _ = try await PipelineRunner.run(pipeline, executor: executor)
+        XCTAssertEqual(executor.maxTokens.first ?? nil, 12_345)
+    }
+
+    // When the transcript passes the compaction trigger, a compaction turn summarizes the older
+    // middle and rewrites the transcript; the next turn runs on the compacted context.
+    func testAgentLoop_compactsTranscriptWhenLarge() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cp-agent-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // Turn 1 writes a large file (its result balloons the transcript past the trigger); turn 2
+        // is the compaction summarizer (String output → "COMPACTED"); turn 3 is the final answer.
+        let bigContent = String(repeating: "x", count: 9_000)
+        let script: [ModelTurn] = [
+            ModelTurn(toolCalls: [ToolCall(
+                id: "1", name: "write_file",
+                arguments: #"{"path":"big.txt","content":"\#(bigContent)"}"#)]),
+            ModelTurn(reply: "COMPACTED"),
+            ModelTurn(reply: "done"),
+        ]
+        let executor = CapturingExecutor(script)
+        // Small context (default 4096 output) → transcriptCap 8000, trigger 6000, so the ~9k write
+        // forces compaction on the next turn.
+        let pipeline = CodingAgentPipeline(
+            task: "make big.txt", tools: defaultCodingTools(jail: PathJail(root: root)),
+            maxTurns: 8, contextTokens: 8_192, maxOutputTokens: 4_096)
+        let result = try await PipelineRunner.run(pipeline, executor: executor)
+
+        XCTAssertEqual(try JSONDecoder().decode(String.self, from: result), "done")
+        // A later turn's model input must show the compaction marker and the summary text.
+        let compacted = executor.messages.first { $0.contains("[Earlier context compacted:]") }
+        XCTAssertNotNil(compacted, "expected a compacted transcript to reach the model")
+        XCTAssertTrue(compacted?.contains("COMPACTED") ?? false)
     }
 
     // Persistent empty turns end the loop with a clear note rather than spinning to maxTurns.

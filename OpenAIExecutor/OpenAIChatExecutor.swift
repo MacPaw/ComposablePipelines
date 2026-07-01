@@ -18,16 +18,64 @@ public enum OpenAIChatExecutorError: Error, Equatable {
     case emptyResponse
 }
 
+/// Resolved limits for a model: the total context window and the per-response output cap (in tokens).
+public struct ModelCapabilities: Sendable, Equatable {
+    public var contextTokens: Int
+    public var maxOutputTokens: Int
+
+    public init(contextTokens: Int, maxOutputTokens: Int) {
+        self.contextTokens = contextTokens
+        self.maxOutputTokens = maxOutputTokens
+    }
+
+    /// Conservative fallback when neither the API nor the environment reports limits.
+    public static let `default` = ModelCapabilities(contextTokens: 8_192, maxOutputTokens: 4_096)
+
+    /// Best-effort context window for well-known model families, used when neither the API nor the
+    /// environment reports one. Deliberately small and conservative — many servers omit the real
+    /// value, and this saves setting `OPENAI_CONTEXT_TOKENS` for common models. Override anytime.
+    public static func knownContextWindow(forModelID id: String) -> Int? {
+        let name = id.lowercased()
+        if name.contains("gemma-4") || name.contains("gemma4") { return 262_144 }
+        if name.contains("gemma-3") || name.contains("gemma3") { return 131_072 }
+        if name.contains("qwen3") || name.contains("qwen-3") { return 262_144 }
+        if name.contains("llama-3") || name.contains("llama3") { return 131_072 }
+        return nil
+    }
+}
+
+/// Token usage reported by the server for one response. `promptTokens` is the context consumed.
+public struct Usage: Sendable, Equatable {
+    public var promptTokens: Int
+    public var completionTokens: Int
+    public var totalTokens: Int
+
+    public init(promptTokens: Int, completionTokens: Int, totalTokens: Int) {
+        self.promptTokens = promptTokens
+        self.completionTokens = completionTokens
+        self.totalTokens = totalTokens
+    }
+}
+
 public struct OpenAIChatExecutor: Executor {
     public struct Config: Sendable {
         public var baseURL: URL
         public var apiKey: String
         public var model: String
+        /// Optional capability hints from the environment, used when the API doesn't report limits
+        /// (many OpenAI-compatible servers omit context/output fields from `/v1/models`).
+        public var contextTokens: Int?
+        public var maxOutputTokens: Int?
 
-        public init(baseURL: URL, apiKey: String, model: String) {
+        public init(
+            baseURL: URL, apiKey: String, model: String,
+            contextTokens: Int? = nil, maxOutputTokens: Int? = nil
+        ) {
             self.baseURL = baseURL
             self.apiKey = apiKey
             self.model = model
+            self.contextTokens = contextTokens
+            self.maxOutputTokens = maxOutputTokens
         }
 
         public static func fromEnvironment(
@@ -40,16 +88,25 @@ public struct OpenAIChatExecutor: Executor {
             guard let url = URL(string: base) else {
                 throw OpenAIChatExecutorError.invalidBaseURL(base)
             }
-            return Config(baseURL: url, apiKey: key, model: env["OPENAI_MODEL"] ?? "gpt-4o-mini")
+            return Config(
+                baseURL: url, apiKey: key, model: env["OPENAI_MODEL"] ?? "gpt-4o-mini",
+                contextTokens: env["OPENAI_CONTEXT_TOKENS"].flatMap { Int($0) },
+                maxOutputTokens: env["OPENAI_MAX_OUTPUT_TOKENS"].flatMap { Int($0) })
         }
     }
 
     let config: Config
     let session: URLSession
+    let onUsage: (@Sendable (Usage) -> Void)?
 
-    public init(config: Config, session: URLSession = .shared) {
+    public init(
+        config: Config,
+        session: URLSession = .shared,
+        onUsage: (@Sendable (Usage) -> Void)? = nil
+    ) {
         self.config = config
         self.session = session
+        self.onUsage = onUsage
     }
 
     public func runModel(
@@ -73,6 +130,47 @@ public struct OpenAIChatExecutor: Executor {
         // Plain-text output must carry text.
         guard let content else { throw OpenAIChatExecutorError.emptyResponse }
         return try JSONEncoder().encode(content)
+    }
+
+    // MARK: - Capabilities
+
+    /// Resolve the model's limits: prefer values the API reports, then environment hints on the
+    /// ``Config``, then ``ModelCapabilities/default``. Best-effort and never throws — a server that
+    /// omits capability fields (the common case) simply falls through to the configured defaults.
+    public func fetchCapabilities() async -> ModelCapabilities {
+        let api = await fetchModelInfo()
+        // API report → env hint → known-model heuristic → conservative default.
+        let context = api.contextTokens
+            ?? config.contextTokens
+            ?? ModelCapabilities.knownContextWindow(forModelID: config.model)
+            ?? ModelCapabilities.default.contextTokens
+        let output = api.maxOutputTokens ?? config.maxOutputTokens ?? ModelCapabilities.default.maxOutputTokens
+        // Output can never exceed the context window.
+        return ModelCapabilities(contextTokens: context, maxOutputTokens: min(output, context))
+    }
+
+    /// Best-effort `GET /v1/models`: find this model's entry and read whatever capability fields the
+    /// server exposes. Servers vary wildly, so we probe the common key spellings and tolerate their
+    /// absence. Returns `(nil, nil)` on any error.
+    private func fetchModelInfo() async -> (contextTokens: Int?, maxOutputTokens: Int?) {
+        let contextKeys = ["context_length", "max_context_length", "max_model_len",
+                           "context_window", "max_context", "n_ctx"]
+        let outputKeys = ["max_output_tokens", "max_completion_tokens", "max_tokens"]
+        var req = URLRequest(url: config.baseURL.appendingPathComponent("models"))
+        req.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+        req.timeoutInterval = 30
+        guard
+            let (data, response) = try? await session.data(for: req),
+            let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+            let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let entries = root["data"] as? [[String: Any]],
+            let entry = entries.first(where: { $0["id"] as? String == config.model }) ?? entries.first
+        else { return (nil, nil) }
+        func firstInt(_ keys: [String]) -> Int? {
+            for key in keys { if let value = entry[key] as? Int, value > 0 { return value } }
+            return nil
+        }
+        return (firstInt(contextKeys), firstInt(outputKeys))
     }
 
     // MARK: - Wire types (request)
@@ -163,6 +261,17 @@ public struct OpenAIChatExecutor: Executor {
     private struct ChatResponse: Decodable {
         struct Choice: Decodable { let message: ResponseMessage }
         let choices: [Choice]
+        let usage: UsageWire?
+    }
+    private struct UsageWire: Decodable {
+        let promptTokens: Int?
+        let completionTokens: Int?
+        let totalTokens: Int?
+        enum CodingKeys: String, CodingKey {
+            case promptTokens = "prompt_tokens"
+            case completionTokens = "completion_tokens"
+            case totalTokens = "total_tokens"
+        }
     }
     private struct ResponseMessage: Decodable {
         let content: String?
@@ -211,6 +320,12 @@ public struct OpenAIChatExecutor: Executor {
             throw OpenAIChatExecutorError.httpStatus(http.statusCode, String(decoding: data, as: UTF8.self))
         }
         let decoded = try JSONDecoder().decode(ChatResponse.self, from: data)
+        if let usage = decoded.usage {
+            onUsage?(Usage(
+                promptTokens: usage.promptTokens ?? 0,
+                completionTokens: usage.completionTokens ?? 0,
+                totalTokens: usage.totalTokens ?? 0))
+        }
         guard let message = decoded.choices.first?.message else {
             throw OpenAIChatExecutorError.emptyResponse
         }

@@ -22,6 +22,9 @@ public actor CodingAgentAdapter: ChatAgent {
     private let jail: PathJail
     private let maxTurns: Int
     private let historyLimit: Int
+    private let contextTokens: Int
+    private let maxOutputTokens: Int
+    private let compaction: Bool
     private var history: [(user: String, assistant: String)] = []
 
     public init(
@@ -29,13 +32,19 @@ public actor CodingAgentAdapter: ChatAgent {
         executor: any Executor,
         jail: PathJail,
         maxTurns: Int = 15,
-        historyLimit: Int = 4
+        historyLimit: Int = 4,
+        contextTokens: Int = 8_192,
+        maxOutputTokens: Int = 4_096,
+        compaction: Bool = true
     ) {
         self.name = name
         self.executor = executor
         self.jail = jail
         self.maxTurns = maxTurns
         self.historyLimit = historyLimit
+        self.contextTokens = contextTokens
+        self.maxOutputTokens = maxOutputTokens
+        self.compaction = compaction
     }
 
     public func send(
@@ -44,7 +53,8 @@ public actor CodingAgentAdapter: ChatAgent {
     ) async throws -> String {
         onEvent(.thinking)
         let pipeline = CodingAgentPipeline(
-            task: composeTask(message), tools: defaultCodingTools(jail: jail), maxTurns: maxTurns)
+            task: composeTask(message), tools: defaultCodingTools(jail: jail), maxTurns: maxTurns,
+            contextTokens: contextTokens, maxOutputTokens: maxOutputTokens, compaction: compaction)
 
         let result = try await PipelineRunner.run(pipeline, executor: executor) { event in
             switch event {

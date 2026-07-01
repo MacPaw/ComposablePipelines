@@ -19,7 +19,7 @@ import PipelineCompiler
 ///   time. Correct when control flow does not depend on *produced* values — linear flow,
 ///   `ForEach`, runtime `.get()` reads, retrieval.
 /// - ``runReactive(_:executor:initialSlots:clientActionResolver:maxReexecutionDepth:optimizations:)``
-///   mirrors `LocalElixClient`: it re-lowers + recompiles after every commit and feeds committed
+///   mirrors a reactive host client: it re-lowers + recompiles after every commit and feeds committed
 ///   slot values back into a persistent DSL `ExecutionContext`. Required for `While` loops and
 ///   `if`/`switch` that branch on model output.
 ///
@@ -83,7 +83,7 @@ enum PipelineRun {
         registry.merge(first.actions)
         let sink = EventSink()
 
-        // Mirror `_LocalElixClient`: commit batches are buffered via `onCommittedBatch`, then
+        // Mirror a reactive host client: commit batches are buffered via `onCommittedBatch`, then
         // applied to the DSL context *inside* the graphProvider right before re-lowering — so the
         // re-lowered condition/branches see exactly the committed slot values, and the engine's
         // own prefix-skip is disabled (we hand back a cursor-trimmed graph).
@@ -135,7 +135,7 @@ enum PipelineRun {
         }
     }
 
-    /// Buffers commit batches between flushes (drained inside the graphProvider, like `_LocalElixClient`).
+    /// Buffers commit batches between flushes (drained inside the graphProvider, like a host client).
     private final class PendingCommits: @unchecked Sendable {
         private let lock = NSLock()
         private var commits: [StateUpdate] = []

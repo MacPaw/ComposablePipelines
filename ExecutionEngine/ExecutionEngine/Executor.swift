@@ -21,8 +21,8 @@ public enum ExecutorError: Error, Sendable {
 /// `PipelineWalker` orchestrates the graph — traversal, epochs, state, parallel batching — and
 /// calls an `Executor` to do the real work of a model step. Implementations own *how* a step runs
 /// (model backends, resource lifecycle, selection, caching, token streaming); the walker knows none
-/// of that. Elix ships a proprietary executor; `MockExecutor` is the open stand-in, and a host can
-/// provide its own (e.g. routing model steps to a remote API).
+/// of that. A proprietary runtime can ship its own executor; `MockExecutor` is the open stand-in,
+/// and a host can provide its own (e.g. routing model steps to a remote API).
 ///
 /// Guardrails are not a distinct seam operation: they lower to an ordinary model classification
 /// (`GuardrailClassification`) and run through `runModel` like any other model step.

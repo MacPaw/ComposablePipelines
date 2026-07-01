@@ -26,7 +26,7 @@ struct GraphWalker: Sendable {
     private let context: ExecutionContext
     private let logger: PipelineLog
 
-    /// Same logger used for numbered step / parallel tree lines (`…elix-engine.walker` under the engine).
+    /// Same logger used for numbered step / parallel tree lines (`…engine.walker` under the engine).
     var stepVerboseLogger: PipelineLog { logger }
 
     // MARK: - Init

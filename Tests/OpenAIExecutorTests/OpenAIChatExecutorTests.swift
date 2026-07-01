@@ -10,6 +10,14 @@ import XCTest
 import PipelineAST
 @testable import OpenAIExecutor
 
+/// Thread-safe capture for the `@Sendable` usage callback.
+private final class UsageBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Usage?
+    var last: Usage? { lock.lock(); defer { lock.unlock() }; return value }
+    func set(_ usage: Usage) { lock.lock(); value = usage; lock.unlock() }
+}
+
 final class OpenAIChatExecutorTests: XCTestCase {
     override func setUp() {
         super.setUp()
@@ -68,13 +76,99 @@ final class StubURLProtocol: URLProtocol {
 // MARK: - runModel tests
 
 extension OpenAIChatExecutorTests {
-    private func stubbedExecutor() -> OpenAIChatExecutor {
+    private func stubbedExecutor(
+        contextTokens: Int? = nil, maxOutputTokens: Int? = nil
+    ) -> OpenAIChatExecutor {
         let cfg = URLSessionConfiguration.ephemeral
         cfg.protocolClasses = [StubURLProtocol.self]
         let session = URLSession(configuration: cfg)
         let config = OpenAIChatExecutor.Config(
-            baseURL: URL(string: "https://example.test/v1")!, apiKey: "k", model: "m")
+            baseURL: URL(string: "https://example.test/v1")!, apiKey: "k", model: "m",
+            contextTokens: contextTokens, maxOutputTokens: maxOutputTokens)
         return OpenAIChatExecutor(config: config, session: session)
+    }
+
+    // MARK: - Capabilities
+
+    func testConfig_readsCapabilityEnv() throws {
+        let c = try OpenAIChatExecutor.Config.fromEnvironment([
+            "OPENAI_API_KEY": "k", "OPENAI_CONTEXT_TOKENS": "262144", "OPENAI_MAX_OUTPUT_TOKENS": "8192"])
+        XCTAssertEqual(c.contextTokens, 262_144)
+        XCTAssertEqual(c.maxOutputTokens, 8_192)
+    }
+
+    func testFetchCapabilities_readsFromModelsList() async {
+        StubURLProtocol.handler = { req in
+            let body = Data(#"{"object":"list","data":[{"id":"m","context_length":262144,"max_output_tokens":8192}]}"#.utf8)
+            return (HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, body)
+        }
+        let caps = await stubbedExecutor().fetchCapabilities()
+        XCTAssertEqual(caps.contextTokens, 262_144)
+        XCTAssertEqual(caps.maxOutputTokens, 8_192)
+    }
+
+    func testFetchCapabilities_fallsBackToConfigWhenServerOmitsThem() async {
+        // Server returns the bare spec (no capability fields) — the Config/env hint wins.
+        StubURLProtocol.handler = { req in
+            (HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+             Data(#"{"object":"list","data":[{"id":"m","object":"model"}]}"#.utf8))
+        }
+        let caps = await stubbedExecutor(contextTokens: 262_144, maxOutputTokens: 8_192).fetchCapabilities()
+        XCTAssertEqual(caps.contextTokens, 262_144)
+        XCTAssertEqual(caps.maxOutputTokens, 8_192)
+    }
+
+    func testRunModel_reportsServerUsage() async throws {
+        StubURLProtocol.handler = { req in
+            let body = Data(#"{"choices":[{"message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":123,"completion_tokens":45,"total_tokens":168}}"#.utf8)
+            return (HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, body)
+        }
+        let box = UsageBox()
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.protocolClasses = [StubURLProtocol.self]
+        let session = URLSession(configuration: cfg)
+        let exec = OpenAIChatExecutor(
+            config: .init(baseURL: URL(string: "https://example.test/v1")!, apiKey: "k", model: "m"),
+            session: session, onUsage: { box.set($0) })
+        _ = try await exec.runModel(
+            config: ModelConfig(outputTypeName: "String"),
+            arguments: ["message": .message(.string("u"))], onDelta: nil)
+        XCTAssertEqual(box.last?.promptTokens, 123)
+        XCTAssertEqual(box.last?.completionTokens, 45)
+        XCTAssertEqual(box.last?.totalTokens, 168)
+    }
+
+    func testFetchCapabilities_infersKnownModelWindow() async {
+        // Server omits capability fields and no env hint is set — infer from the model id.
+        StubURLProtocol.handler = { req in
+            (HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+             Data(#"{"object":"list","data":[{"id":"mlx-community/gemma-4-26b-a4b-it-4bit"}]}"#.utf8))
+        }
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.protocolClasses = [StubURLProtocol.self]
+        let session = URLSession(configuration: cfg)
+        let exec = OpenAIChatExecutor(
+            config: .init(baseURL: URL(string: "https://example.test/v1")!, apiKey: "k",
+                          model: "mlx-community/gemma-4-26b-a4b-it-4bit"),
+            session: session)
+        let caps = await exec.fetchCapabilities()
+        XCTAssertEqual(caps.contextTokens, 262_144)
+    }
+
+    func testKnownContextWindow_matchesFamilies() {
+        XCTAssertEqual(ModelCapabilities.knownContextWindow(forModelID: "mlx-community/gemma-4-26b-a4b-it-4bit"), 262_144)
+        XCTAssertEqual(ModelCapabilities.knownContextWindow(forModelID: "google/gemma-3-12b"), 131_072)
+        XCTAssertNil(ModelCapabilities.knownContextWindow(forModelID: "some-unknown-model"))
+    }
+
+    func testFetchCapabilities_fallsBackToDefaultWhenNothingKnown() async {
+        StubURLProtocol.handler = { req in
+            (HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+             Data(#"{"object":"list","data":[{"id":"m"}]}"#.utf8))
+        }
+        let caps = await stubbedExecutor().fetchCapabilities()
+        XCTAssertEqual(caps.contextTokens, ModelCapabilities.default.contextTokens)
+        XCTAssertEqual(caps.maxOutputTokens, ModelCapabilities.default.maxOutputTokens)
     }
 
     func testRunModel_postsChatCompletions_andReturnsReply() async throws {

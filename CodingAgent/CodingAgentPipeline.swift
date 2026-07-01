@@ -14,27 +14,47 @@ import ComposablePipelines
 /// Each turn the model sees the running transcript plus the tool schemas and returns a
 /// ``ModelTurn``. Tool calls are dispatched through a `ToolRegistry` and their results appended to
 /// the transcript; the `While` loop ends when the model returns a final `reply` (or `maxTurns` is
-/// reached). Drive it with ``PipelineRunner/run(_:executor:initialSlots:maxReexecutionDepth:optimizations:observingExecution:)``.
+/// reached). When the transcript approaches the context window, a compaction turn summarizes the
+/// older middle (see ``CompactTranscript``) instead of losing it to truncation. Drive it with
+/// ``PipelineRunner/run(_:executor:initialSlots:maxReexecutionDepth:optimizations:observingExecution:)``.
 public struct CodingAgentPipeline: Pipeline {
     public typealias Output = String
 
     let task: String
     let maxTurns: Int
     let tools: [any ModelTool]
+    let contextTokens: Int
+    let maxOutputTokens: Int
+    let compaction: Bool
 
     @State var transcript: String
     @State var lastTurn: ModelTurn = ModelTurn()
     @State var reply: String = ""
     @State var turns: Int = 0
     @State var stalls: Int = 0
+    // ModelTurn (not String) so an empty/truncated summarizer turn degrades gracefully instead of
+    // throwing — the same reason the main loop uses ModelTurn output.
+    @State var compactionSummary: ModelTurn = ModelTurn()
 
     /// How many consecutive empty turns to tolerate (with a nudge) before giving up.
     private let maxStalls = 3
+    /// Characters of the transcript head (the task) kept verbatim through compaction.
+    private let compactionHeadChars = 400
 
-    public init(task: String, tools: [any ModelTool], maxTurns: Int = 15) {
+    public init(
+        task: String,
+        tools: [any ModelTool],
+        maxTurns: Int = 15,
+        contextTokens: Int = 8_192,
+        maxOutputTokens: Int = 4_096,
+        compaction: Bool = true
+    ) {
         self.task = task
         self.tools = tools
         self.maxTurns = maxTurns
+        self.contextTokens = contextTokens
+        self.maxOutputTokens = maxOutputTokens
+        self.compaction = compaction
         _transcript = State(wrappedValue: "Task: \(task)")
     }
 
@@ -49,62 +69,98 @@ public struct CodingAgentPipeline: Pipeline {
         """
     }
 
+    // Char budgets derived from the model's context window (~3 chars/token, conservative).
+    // A large-context model (e.g. 256k) keeps full files and many turns without truncating;
+    // a small one stays tight. Output tokens and headroom are reserved out of the input budget.
+    private var snippetCharCap: Int { min(contextTokens * 3, 48_000) }
+    private var transcriptCharCap: Int { max(8_000, (contextTokens - maxOutputTokens - 2_048) * 3) }
+    // Compact once the transcript passes 3/4 of the hard cap — before truncation would kick in.
+    private var compactionTrigger: Int { transcriptCharCap * 3 / 4 }
+    // Keep enough recent tail to stay coherent, but leave margin so the compacted transcript lands
+    // well under the trigger (head + summary + tail ≈ 0.6·trigger) and doesn't immediately re-compact.
+    private var compactionTailChars: Int { compactionTrigger / 3 }
+    private var compactionSummaryTokens: Int { min(max(compactionTrigger / 12, 512), 2_048) }
+
     public var body: some Pipeline {
         While(condition: { reply.isEmpty && turns < maxTurns }) {
             // Snapshot committed state at lowering so the dispatch tasks can extend it.
             let priorTranscript = transcript
             let priorStalls = stalls
             let cap = maxStalls
-            let registry = ToolRegistry(tools)
+            let snippetCap = snippetCharCap
+            let transcriptCap = transcriptCharCap
 
-            $lastTurn.set {
-                Model<ModelTurn>()
-                    .tools(tools.map(\.descriptor))
-                    .systemPrompt(systemPrompt)
-                    .maxTokens(8192)
-                    .input { $transcript.get() }
-            }
-            // Extend the transcript: append tool results, or — on an empty turn — a nudge so the
-            // next turn sees a different prompt and can recover. A tool-free answer turn is final
-            // and leaves the transcript unchanged.
-            $transcript.set {
-                ClientTask(input: $lastTurn) { turn in
-                    if let calls = turn.toolCalls, !calls.isEmpty {
-                        var updated = priorTranscript
-                        for call in calls {
-                            let output = try await registry.executeJSON(
-                                toolName: call.name, inputJSON: Data(call.arguments.utf8))
-                            let text = (try? JSONDecoder().decode(String.self, from: output))
-                                ?? String(decoding: output, as: UTF8.self)
-                            let snippet = text.count > 4000 ? String(text.prefix(4000)) + "\n…[truncated]" : text
-                            updated += "\n\nAssistant: call \(call.name)(\(call.arguments))\n[\(call.name)]\n\(snippet)"
+            if compaction && priorTranscript.count > compactionTrigger {
+                // Compaction turn: summarize the older middle, preserving task header + recent tail.
+                // No model turn happens this iteration; `reply` stays empty so the loop continues on
+                // the compacted transcript next time.
+                CompactTranscript(
+                    summary: $compactionSummary,
+                    transcript: $transcript,
+                    head: String(priorTranscript.prefix(compactionHeadChars)),
+                    middle: middle(of: priorTranscript),
+                    tail: String(priorTranscript.suffix(compactionTailChars)),
+                    maxTokens: compactionSummaryTokens)
+            } else {
+                // Work turn: model + tool dispatch.
+                let registry = ToolRegistry(tools)
+
+                $lastTurn.set {
+                    Model<ModelTurn>()
+                        .tools(tools.map(\.descriptor))
+                        .systemPrompt(systemPrompt)
+                        .maxTokens(maxOutputTokens)
+                        .input { $transcript.get() }
+                }
+                // Extend the transcript: append tool results, or — on an empty turn — a nudge so the
+                // next turn sees a different prompt and can recover. A tool-free answer turn is final
+                // and leaves the transcript unchanged.
+                $transcript.set {
+                    ClientTask(input: $lastTurn) { turn in
+                        if let calls = turn.toolCalls, !calls.isEmpty {
+                            var updated = priorTranscript
+                            for call in calls {
+                                let output = try await registry.executeJSON(
+                                    toolName: call.name, inputJSON: Data(call.arguments.utf8))
+                                let text = (try? JSONDecoder().decode(String.self, from: output))
+                                    ?? String(decoding: output, as: UTF8.self)
+                                let snippet = text.count > snippetCap
+                                    ? String(text.prefix(snippetCap)) + "\n…[truncated]" : text
+                                updated += "\n\nAssistant: call \(call.name)(\(call.arguments))\n[\(call.name)]\n\(snippet)"
+                            }
+                            // Final safety net: if compaction is off or a single turn overflows, hard-trim.
+                            if updated.count > transcriptCap {
+                                let head = String(updated.prefix(400))
+                                let tail = String(updated.suffix(transcriptCap - 400))
+                                updated = head + "\n…[earlier context trimmed]…\n" + tail
+                            }
+                            return updated
                         }
-                        return updated
+                        if let reply = turn.reply, !reply.isEmpty { return priorTranscript }
+                        return priorTranscript
+                            + "\n\n(Your previous turn was empty. Call a tool to make progress, or write your final answer.)"
                     }
-                    if let reply = turn.reply, !reply.isEmpty { return priorTranscript }
-                    return priorTranscript
-                        + "\n\n(Your previous turn was empty. Call a tool to make progress, or write your final answer.)"
                 }
-            }
-            // Track consecutive empty turns; reset on any productive turn.
-            $stalls.set {
-                ClientTask(input: $lastTurn) { turn in
-                    let empty = (turn.toolCalls?.isEmpty ?? true) && (turn.reply?.isEmpty ?? true)
-                    return empty ? priorStalls + 1 : 0
+                // Track consecutive empty turns; reset on any productive turn.
+                $stalls.set {
+                    ClientTask(input: $lastTurn) { turn in
+                        let empty = (turn.toolCalls?.isEmpty ?? true) && (turn.reply?.isEmpty ?? true)
+                        return empty ? priorStalls + 1 : 0
+                    }
                 }
-            }
-            $reply.set {
-                ClientTask(input: $lastTurn) { turn in
-                    // A turn that also requested tools is NOT final — many models emit a preamble
-                    // ("I'll list the files…") alongside the tool call. Keep looping so the tool
-                    // results feed the next turn.
-                    if let calls = turn.toolCalls, !calls.isEmpty { return "" }
-                    // A tool-free turn with text is the final answer.
-                    if let reply = turn.reply, !reply.isEmpty { return reply }
-                    // Empty turn: keep going (with the nudge above) until stalls persist, then stop.
-                    return priorStalls + 1 >= cap
-                        ? "(the model kept returning empty turns — try rephrasing or a smaller step)"
-                        : ""
+                $reply.set {
+                    ClientTask(input: $lastTurn) { turn in
+                        // A turn that also requested tools is NOT final — many models emit a preamble
+                        // ("I'll list the files…") alongside the tool call. Keep looping so the tool
+                        // results feed the next turn.
+                        if let calls = turn.toolCalls, !calls.isEmpty { return "" }
+                        // A tool-free turn with text is the final answer.
+                        if let reply = turn.reply, !reply.isEmpty { return reply }
+                        // Empty turn: keep going (with the nudge above) until stalls persist, then stop.
+                        return priorStalls + 1 >= cap
+                            ? "(the model kept returning empty turns — try rephrasing or a smaller step)"
+                            : ""
+                    }
                 }
             }
             $turns.set {
@@ -112,5 +168,48 @@ public struct CodingAgentPipeline: Pipeline {
             }
         }
         $reply.get()
+    }
+
+    /// The transcript minus the preserved head and tail — the portion compaction summarizes.
+    private func middle(of full: String) -> String {
+        guard full.count > compactionHeadChars + compactionTailChars else { return full }
+        let start = full.index(full.startIndex, offsetBy: compactionHeadChars)
+        let end = full.index(full.endIndex, offsetBy: -compactionTailChars)
+        return String(full[start..<end])
+    }
+}
+
+/// A sub-pipeline that compacts a long transcript: it summarizes `middle` via a `Model<String>`
+/// call and rewrites `transcript` as `head + summary + tail`. Both `summary` and `transcript` are
+/// the parent's bindings, so their slot ids stay stable across the reactive loop's re-lowerings.
+struct CompactTranscript: Pipeline {
+    typealias Output = String
+
+    let summary: Binding<ModelTurn>
+    let transcript: Binding<String>
+    let head: String
+    let middle: String
+    let tail: String
+    let maxTokens: Int
+
+    private static let prompt = """
+        You are compacting a long agent transcript to fit the context window. Summarize the excerpt \
+        below into a dense recap that preserves the goal, decisions made, findings, file paths, and \
+        tool results needed to continue the task. Output only the summary.
+        """
+
+    var body: some Pipeline {
+        summary.set {
+            Model<ModelTurn>()
+                .systemPrompt(Self.prompt)
+                .maxTokens(maxTokens)
+                .message(middle)
+        }
+        transcript.set {
+            ClientTask(input: summary) { turn in
+                // An empty summarizer turn degrades to keeping just head + tail (no crash).
+                head + "\n\n[Earlier context compacted:]\n" + (turn.reply ?? "") + "\n\n" + tail
+            }
+        }
     }
 }

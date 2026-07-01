@@ -87,7 +87,7 @@ public struct ExecutionContext: @unchecked Sendable {
 
     /// Latest bytes for ``slotID`` (last appended commit for that slot, else live ``bindings``).
     ///
-    /// Client tasks that run **after** the ElixEngine applies a commit batch often need this instead of
+    /// Client tasks that run **after** the engine applies a commit batch often need this instead of
     /// ``asOfData(slotID:executionEpoch:)`` with ``committedEpoch``: batched epoch ordering can leave
     /// ``asOfData`` without a matching history row even though ``bindings`` already holds the value.
     @_spi(Internals) public func latestSlotBytes(slotID: UUID) -> Data? {

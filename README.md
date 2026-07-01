@@ -202,6 +202,6 @@ Apache License 2.0 — © MacPaw Inc. See [LICENSE](LICENSE) and [NOTICE](NOTICE
 
 ## A note on this repository
 
-This repository is a **mirror**. The source of truth lives in MacPaw's monorepo and is
-exported here one-directionally. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening
+This repository is a read-only **mirror**: changes are made upstream and exported here, so code
+is not edited directly in this repo. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening
 issues or pull requests.

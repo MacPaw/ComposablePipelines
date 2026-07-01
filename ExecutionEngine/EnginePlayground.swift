@@ -1,5 +1,5 @@
 //
-//  ElixEnginePlayground.swift
+//  EnginePlayground.swift
 //  ComposablePipelines
 //
 //  Copyright © 2026 MacPaw Inc. All rights reserved.
@@ -12,10 +12,9 @@ import PipelineCompiler
 
 /// Public entry for **Xcode apps / playgrounds** outside this Swift package.
 ///
-/// `PipelineWalker` and related types are `package` and are not visible to
-/// external targets; use this namespace from `PipelineDSLPlayground` (or any
-/// app) to run the same engine path Oleksandr implemented.
-public enum ElixEnginePlayground {
+/// `PipelineWalker` and related types are `package` and are not visible to external targets;
+/// use this namespace from an app or playground to run the same engine path.
+public enum EnginePlayground {
 
     /// Wraps a static `taskID` → handler map as ``runGraph``'s `clientActionProvider`.
     public static func clientActionProvider(

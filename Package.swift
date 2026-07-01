@@ -4,9 +4,6 @@
 // a SwiftUI-like DSL, a Codable AST, a compiler, and an observable walker. Execution
 // plugs in through the `Executor` seam.
 //
-// This is a real local package: the monorepo consumes it via `.package(path:)` and the
-// public mirror is a verbatim copy of this directory. Source of truth lives in the monorepo.
-//
 // Copyright © 2026 MacPaw Inc. Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import CompilerPluginSupport

@@ -81,12 +81,12 @@ public extension ModelTool {
 /// Authoring surface for agent-side tools.
 ///
 /// An `AgentTool` has a descriptor (name, description, schema) but no local implementation —
-/// execution always happens inside the Elix agent daemon. Elix ships concrete `AgentTool` types
-/// as SDK stubs; developers reference them in `Model(tools:)` so the model sees the schema,
-/// but the implementation never crosses the XPC boundary.
+/// execution happens in the host runtime. A host may ship concrete `AgentTool` types as stubs;
+/// developers reference them in `Model(tools:)` so the model sees the schema, but the
+/// implementation is not part of this package.
 ///
-/// In local execution (`LocalElixClient`), agent tools are not added to the dispatch registry
-/// and will not be callable — a clear error surfaces if the model tries to invoke one.
+/// In local execution, agent tools are not added to the dispatch registry and will not be
+/// callable — a clear error surfaces if the model tries to invoke one.
 public protocol AgentTool: PipelineTool {
     static var name: String { get }
     static var description: String { get }
