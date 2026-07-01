@@ -24,7 +24,8 @@ public struct CodingAgentPipeline: Pipeline {
     let maxTurns: Int
     let tools: [any ModelTool]
     let contextTokens: Int
-    let maxOutputTokens: Int
+    /// Per-response output cap. `nil` → don't send `max_tokens`; the server uses its own default.
+    let maxOutputTokens: Int?
     let compaction: Bool
 
     @State var transcript: String
@@ -46,7 +47,7 @@ public struct CodingAgentPipeline: Pipeline {
         tools: [any ModelTool],
         maxTurns: Int = 15,
         contextTokens: Int = 8_192,
-        maxOutputTokens: Int = 4_096,
+        maxOutputTokens: Int? = nil,
         compaction: Bool = true
     ) {
         self.task = task
@@ -73,7 +74,7 @@ public struct CodingAgentPipeline: Pipeline {
     // A large-context model (e.g. 256k) keeps full files and many turns without truncating;
     // a small one stays tight. Output tokens and headroom are reserved out of the input budget.
     private var snippetCharCap: Int { min(contextTokens * 3, 48_000) }
-    private var transcriptCharCap: Int { max(8_000, (contextTokens - maxOutputTokens - 2_048) * 3) }
+    private var transcriptCharCap: Int { max(8_000, (contextTokens - (maxOutputTokens ?? 4_096) - 2_048) * 3) }
     // Compact once the transcript passes 3/4 of the hard cap — before truncation would kick in.
     private var compactionTrigger: Int { transcriptCharCap * 3 / 4 }
     // Keep enough recent tail to stay coherent, but leave margin so the compacted transcript lands
@@ -106,10 +107,11 @@ public struct CodingAgentPipeline: Pipeline {
                 let registry = ToolRegistry(tools)
 
                 $lastTurn.set {
-                    Model<ModelTurn>()
+                    let base = Model<ModelTurn>()
                         .tools(tools.map(\.descriptor))
                         .systemPrompt(systemPrompt)
-                        .maxTokens(maxOutputTokens)
+                    // Apply an output cap only if one is configured; otherwise let the server decide.
+                    (maxOutputTokens.map { base.maxTokens($0) } ?? base)
                         .input { $transcript.get() }
                 }
                 // Extend the transcript: append tool results, or — on an empty turn — a nudge so the
@@ -120,13 +122,27 @@ public struct CodingAgentPipeline: Pipeline {
                         if let calls = turn.toolCalls, !calls.isEmpty {
                             var updated = priorTranscript
                             for call in calls {
-                                let output = try await registry.executeJSON(
-                                    toolName: call.name, inputJSON: Data(call.arguments.utf8))
-                                let text = (try? JSONDecoder().decode(String.self, from: output))
-                                    ?? String(decoding: output, as: UTF8.self)
-                                let snippet = text.count > snippetCap
-                                    ? String(text.prefix(snippetCap)) + "\n…[truncated]" : text
-                                updated += "\n\nAssistant: call \(call.name)(\(call.arguments))\n[\(call.name)]\n\(snippet)"
+                                let result: String
+                                do {
+                                    let output = try await registry.executeJSON(
+                                        toolName: call.name, inputJSON: Data(call.arguments.utf8))
+                                    let text = (try? JSONDecoder().decode(String.self, from: output))
+                                        ?? String(decoding: output, as: UTF8.self)
+                                    result = text.count > snippetCap
+                                        ? String(text.prefix(snippetCap)) + "\n…[truncated]" : text
+                                } catch {
+                                    // A malformed tool call (often truncated arguments when the model hit
+                                    // its output cap) must not abort the run — report it so the model can
+                                    // retry with a smaller call.
+                                    result = "error: could not run \(call.name) — \(error.localizedDescription). "
+                                        + "The arguments may have been truncated; retry with less content "
+                                        + "(e.g. write the file in smaller parts)."
+                                }
+                                // Echo only a short prefix of the arguments — a full file's content would
+                                // otherwise be duplicated into the transcript.
+                                let argsEcho = call.arguments.count > 200
+                                    ? String(call.arguments.prefix(200)) + "…" : call.arguments
+                                updated += "\n\nAssistant: call \(call.name)(\(argsEcho))\n[\(call.name)]\n\(result)"
                             }
                             // Final safety net: if compaction is off or a single turn overflows, hard-trim.
                             if updated.count > transcriptCap {

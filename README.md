@@ -176,15 +176,19 @@ OPENAI_API_KEY=x OPENAI_BASE_URL=http://localhost:1977/v1 OPENAI_MODEL=your-loca
   swift run cp-demo "Swift result builders"
 ```
 
-> **Reasoning models** spend tokens thinking before they emit a reply, so a small budget can
-> truncate them before any content appears. The executor discovers the model's context window
-> (or reads `OPENAI_CONTEXT_TOKENS` / `OPENAI_MAX_OUTPUT_TOKENS`) and sizes budgets accordingly.
+> **Output limits.** By default the executor sends no `max_tokens`, letting the server use its own
+> limit (usually the model's full output) — so large single-turn writes aren't truncated. If your
+> server has a low default output cap and cuts replies short (common with reasoning models on some
+> local servers), set `OPENAI_MAX_OUTPUT_TOKENS`. The context window is discovered from the API,
+> `OPENAI_CONTEXT_TOKENS`, or a known-model default.
 
 ## Worked example: a coding agent as a pipeline
 
 The DSL isn't only for linear flows. `cp-agent` is a real, tool-using coding agent — read, list,
 search, write, edit files and run `bash` — with a dark, interactive terminal chat UI. The entire
 agent loop *is* a pipeline, and it's a compact tour of how you engineer non-trivial pipelines.
+
+![cp-agent building a double-pendulum simulation](.github/cp-agent-demo.png)
 
 ```bash
 OPENAI_API_KEY=x OPENAI_BASE_URL=http://localhost:1977/v1 OPENAI_MODEL=your-local-model \

@@ -21,18 +21,22 @@ public enum OpenAIChatExecutorError: Error, Equatable {
     case emptyResponse
 }
 
-/// Resolved limits for a model: the total context window and the per-response output cap (in tokens).
+/// Resolved limits for a model: the total context window, and an optional per-response output cap.
+/// `maxOutputTokens == nil` means "don't cap" — omit `max_tokens` and let the server use its own
+/// default (typically the model's full output capacity). Only set it when the API reports a cap or
+/// the environment requests one.
 public struct ModelCapabilities: Sendable, Equatable {
     public var contextTokens: Int
-    public var maxOutputTokens: Int
+    public var maxOutputTokens: Int?
 
-    public init(contextTokens: Int, maxOutputTokens: Int) {
+    public init(contextTokens: Int, maxOutputTokens: Int? = nil) {
         self.contextTokens = contextTokens
         self.maxOutputTokens = maxOutputTokens
     }
 
-    /// Conservative fallback when neither the API nor the environment reports limits.
-    public static let `default` = ModelCapabilities(contextTokens: 8_192, maxOutputTokens: 4_096)
+    /// Fallback when the API reports no limits: a conservative context window and no output cap
+    /// (the server decides). Set `OPENAI_CONTEXT_TOKENS` / `OPENAI_MAX_OUTPUT_TOKENS` to override.
+    public static let `default` = ModelCapabilities(contextTokens: 8_192, maxOutputTokens: nil)
 
     /// Best-effort context window for well-known model families, used when neither the API nor the
     /// environment reports one. Deliberately small and conservative — many servers omit the real
@@ -147,9 +151,10 @@ public struct OpenAIChatExecutor: Executor {
             ?? config.contextTokens
             ?? ModelCapabilities.knownContextWindow(forModelID: config.model)
             ?? ModelCapabilities.default.contextTokens
-        let output = api.maxOutputTokens ?? config.maxOutputTokens ?? ModelCapabilities.default.maxOutputTokens
-        // Output can never exceed the context window.
-        return ModelCapabilities(contextTokens: context, maxOutputTokens: min(output, context))
+        // Output cap only when the API reports one or the environment sets it — otherwise nil, so we
+        // omit `max_tokens` and let the server use its (usually model-max) default.
+        let output = (api.maxOutputTokens ?? config.maxOutputTokens).map { min($0, context) }
+        return ModelCapabilities(contextTokens: context, maxOutputTokens: output)
     }
 
     /// Best-effort `GET /v1/models`: find this model's entry and read whatever capability fields the
