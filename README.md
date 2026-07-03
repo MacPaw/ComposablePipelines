@@ -330,6 +330,24 @@ struct CodingAgentPipeline: Pipeline {
 - [Technical note](https://research.macpaw.com/publications/composable-ai-pipelines) — the design
   and rationale behind Composable AI Pipelines.
 
+## Citation
+
+If you use Composable Pipelines in your research, please cite the accompanying technical note:
+
+> Maksym Kotliar. **Composable AI Pipelines: Write Intent, Not Infrastructure.** MacPaw Research,
+> 18 May 2026. https://research.macpaw.com/publications/composable-ai-pipelines
+
+```bibtex
+@techreport{kotliar2026composable,
+  title        = {Composable AI Pipelines: Write Intent, Not Infrastructure},
+  author       = {Kotliar, Maksym},
+  institution  = {MacPaw Research},
+  year         = {2026},
+  month        = may,
+  url          = {https://research.macpaw.com/publications/composable-ai-pipelines}
+}
+```
+
 ## License
 
 Apache License 2.0 — © MacPaw Inc. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
