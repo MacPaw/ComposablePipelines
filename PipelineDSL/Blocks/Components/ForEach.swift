@@ -43,13 +43,29 @@ public struct ForEach<C: RandomAccessCollection, Content: Pipeline>: LeafPipelin
         self.data = data
         self.content = content
     }
-    
+
     public init(
         in data: C,
         @PipelineBuilder content: @escaping @Sendable (C.Element) -> Content
     ) {
         self.data = { data }
         self.content = content
+    }
+
+    /// SwiftUI-parity spelling: `ForEach(chunks) { chunk in … }`.
+    public init(
+        _ data: C,
+        @PipelineBuilder content: @escaping @Sendable (C.Element) -> Content
+    ) {
+        self.init(in: data, content: content)
+    }
+
+    /// SwiftUI-parity spelling with a per-emission data source.
+    public init(
+        _ data: @escaping @Sendable () -> C,
+        @PipelineBuilder content: @escaping @Sendable (C.Element) -> Content
+    ) {
+        self.init(in: data, content: content)
     }
 
     public var pipelineGraph: PipelineGraph {

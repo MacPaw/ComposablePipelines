@@ -29,17 +29,15 @@ struct KnowledgeBaseQAPipeline: Pipeline {
 
     var body: some Pipeline {
         // RETRIEVE: ask the provider for context relevant to the question.
-        $context.set { From(knowledgeBase, query: $question) }
+        From(knowledgeBase, query: $question).assign(to: $context)
 
         // GENERATE: answer using only what was retrieved.
-        $answer.set {
-            Model<String>()
-                .systemPrompt("""
-                    Answer the question using only the provided context. \
-                    If the context is insufficient, say you don't know.
-                    """)
-                .input { $context.get() }
-        }
+        Model<String>("""
+            Answer the question using only the provided context. \
+            If the context is insufficient, say you don't know.
+            """)
+            .input { $context }
+            .assign(to: $answer)
     }
 }
 

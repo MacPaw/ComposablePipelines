@@ -25,7 +25,7 @@ let package = Package(
         .library(name: "Examples", targets: ["Examples"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/apple/swift-syntax", from: "600.0.0"),
+        .package(url: "https://github.com/swiftlang/swift-syntax", from: "600.0.0"),
     ],
     targets: [
         // Codable wire-format AST. Foundation-only.

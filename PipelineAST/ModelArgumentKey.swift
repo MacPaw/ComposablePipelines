@@ -54,6 +54,9 @@ public extension ModelArgumentKey {
     static let contextItems: Self = "contextItems"
     static let priorTurns:   Self = "priorTurns"
 
+    /// Rules for guardrail classification. Used by `GuardrailClassification` internally.
+    static let guardrailRules: Self = "guardrailRules"
+
     /// Keys reserved for built-in arguments. Passing any of these to
     /// ``Model/parameter(_:_:)`` is a programming error — use the dedicated builder methods.
     static let builtInKeys: Set<Self> = [

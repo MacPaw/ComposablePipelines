@@ -69,7 +69,9 @@ struct ExecutionGraphEmitter {
                 levelIndices = [gi]
                 queue.removeAll { $0 == gi }
             } else {
-                levelIndices = queue
+                // Sort by node index so parallel-branch ordering is deterministic across
+                // re-emissions regardless of Set<UUID> iteration order in successor lookup.
+                levelIndices = queue.sorted()
                 queue.removeAll()
             }
 
@@ -161,6 +163,15 @@ struct ExecutionGraphEmitter {
         let operation: PipelineExecutionGraph.Operation
 
         switch leaf {
+        case let .router(query, tools):
+            operation = .router(query: emitAST(query), tools: tools)
+
+        case let .dagPlan(query, tools, hints):
+            operation = .dagPlan(query: emitAST(query), tools: tools, hints: hints)
+
+        case let .relevanceRank(query, tools, threshold, topK):
+            operation = .relevanceRank(query: emitAST(query), tools: tools, threshold: threshold, topK: topK)
+
         case let .model(config, arguments):
             operation = .model(config: config, arguments: arguments)
 
@@ -189,8 +200,16 @@ struct ExecutionGraphEmitter {
         case let .executionStateGet(id, valueTypeName, debugLabel, defaultJSON):
             operation = .stateGet(slotID: id, valueTypeName: valueTypeName, debugLabel: debugLabel, defaultJSON: defaultJSON)
 
+        case let .executionStateFrozenSet(id, valueTypeName, debugLabel, defaultJSON):
+            // At runtime: reads the committed slot value, identical to `stateGet`.
+            // The distinct AST case only affects dependency ordering in the compiler.
+            operation = .stateGet(slotID: id, valueTypeName: valueTypeName, debugLabel: debugLabel, defaultJSON: defaultJSON)
+
         case let .clientAction(taskID, input):
             operation = .clientAction(taskID: taskID, input: emitAST(input))
+
+        case let .combine(parts):
+            operation = .combine(inputs: parts.map(emitAST))
 
         case let .contextProvide(providerID, query):
             operation = .contextProvide(providerID: providerID, query: emitAST(query))
@@ -198,8 +217,8 @@ struct ExecutionGraphEmitter {
         case let .memoryQuery(quality, query):
             operation = .memoryQuery(quality: quality, query: emitAST(query))
 
-        case let .memoryStore(plan):
-            operation = .memoryStore(plan: emitAST(plan))
+        case let .memoryStore(plan, mode):
+            operation = .memoryStore(plan: emitAST(plan), mode: mode ?? .sync)
 
         case let .opaque(typeName):
             operation = .constant(valueTypeName: typeName, jsonUTF8: "{}")

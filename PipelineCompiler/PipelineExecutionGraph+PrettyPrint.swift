@@ -101,6 +101,36 @@ private enum Printer {
         let shortID = task.id.uuidString.prefix(8).description
 
         switch task.operation {
+        case let .router(query, _):
+            let queryExpr = inlineExpr(query)
+            if let queryExpr {
+                return ["\(pad)[\(shortID)] router(query: \(queryExpr))"]
+            }
+            var lines = ["\(pad)[\(shortID)] router {"]
+            lines.append(contentsOf: emit(query, indent: indent + 1))
+            lines.append("\(pad)}")
+            return lines
+
+        case let .dagPlan(query, tools, hints):
+            let queryExpr = inlineExpr(query)
+            if let queryExpr {
+                return ["\(pad)[\(shortID)] dagPlan(tools: \(tools.count), hints: \(hints.count), query: \(queryExpr))"]
+            }
+            var lines = ["\(pad)[\(shortID)] dagPlan(tools: \(tools.count), hints: \(hints.count)) {"]
+            lines.append(contentsOf: emit(query, indent: indent + 1))
+            lines.append("\(pad)}")
+            return lines
+
+        case let .relevanceRank(query, tools, threshold, topK):
+            let queryExpr = inlineExpr(query)
+            if let queryExpr {
+                return ["\(pad)[\(shortID)] relevanceRank(tools: \(tools.count), threshold: \(threshold), topK: \(topK), query: \(queryExpr))"]
+            }
+            var lines = ["\(pad)[\(shortID)] relevanceRank(tools: \(tools.count), threshold: \(threshold), topK: \(topK)) {"]
+            lines.append(contentsOf: emit(query, indent: indent + 1))
+            lines.append("\(pad)}")
+            return lines
+
         case let .model(config, arguments):
             let keys = arguments.keys.sorted().joined(separator: ", ")
             let traitsSuffix = traitsExpr(config.traits)
@@ -142,6 +172,19 @@ private enum Printer {
             lines.append("\(pad)}")
             return lines
 
+        case let .combine(inputs):
+            let inlined = inputs.map { inlineExpr($0) }
+            if inlined.allSatisfy({ $0 != nil }) {
+                let joined = inlined.compactMap(\.self).joined(separator: ", ")
+                return ["\(pad)[\(shortID)] combine(\(joined))"]
+            }
+            var lines = ["\(pad)[\(shortID)] combine {"]
+            for input in inputs {
+                lines.append(contentsOf: emit(input, indent: indent + 1))
+            }
+            lines.append("\(pad)}")
+            return lines
+
         case let .contextProvide(providerID, query):
             let queryExpr = inlineExpr(query)
             if let queryExpr {
@@ -162,12 +205,12 @@ private enum Printer {
             lines.append("\(pad)}")
             return lines
 
-        case let .memoryStore(plan):
+        case let .memoryStore(plan, mode):
             let planExpr = inlineExpr(plan)
             if let planExpr {
-                return ["\(pad)[\(shortID)] memory.store(plan: \(planExpr))"]
+                return ["\(pad)[\(shortID)] memory.store(mode: .\(mode.rawValue), plan: \(planExpr))"]
             }
-            var lines = ["\(pad)[\(shortID)] memory.store {"]
+            var lines = ["\(pad)[\(shortID)] memory.store(mode: .\(mode.rawValue)) {"]
             lines.append(contentsOf: emit(plan, indent: indent + 1))
             lines.append("\(pad)}")
             return lines
@@ -202,6 +245,15 @@ private enum Printer {
                 ? String(jsonUTF8.prefix(27)) + "..."
                 : jsonUTF8
             return "\(valueTypeName)(\(truncated))"
+        case let .router(query, _):
+            guard let queryExpr = inlineExpr(query) else { return nil }
+            return "router(\(queryExpr))"
+        case let .dagPlan(query, tools, hints):
+            guard let queryExpr = inlineExpr(query) else { return nil }
+            return "dagPlan(tools: \(tools.count), hints: \(hints.count), query: \(queryExpr))"
+        case let .relevanceRank(query, tools, threshold, topK):
+            guard let queryExpr = inlineExpr(query) else { return nil }
+            return "relevanceRank(tools: \(tools.count), threshold: \(threshold), topK: \(topK), query: \(queryExpr))"
         default:
             return nil
         }

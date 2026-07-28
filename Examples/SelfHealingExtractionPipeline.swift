@@ -19,8 +19,8 @@ import PipelineDSL
 /// - A `Model` step *inside a loop body*: it re-runs every iteration (its output is what the loop
 ///   is trying to get right), and `lastError` — read here at lowering — is folded into each retry's
 ///   prompt.
-/// - `ClientTask` for plain-Swift validation, threading state through the task's typed input rather
-///   than reading `@State` inside the closure (which is disallowed).
+/// - `$slot.map { … }` for plain-Swift validation on the host, threading state through the
+///   binding's value rather than reading `@State` inside the closure (which is disallowed).
 struct SelfHealingExtractionPipeline: Pipeline {
     typealias Output = String
 
@@ -38,28 +38,24 @@ struct SelfHealingExtractionPipeline: Pipeline {
     }
 
     var body: some Pipeline {
-        While(condition: { !valid && attempts < maxAttempts }) {
+        While(!valid && attempts < maxAttempts) {
+            // Prompt folds bare `lastError` (@State) into each retry → closure form captures it.
             $candidate.set {
-                Model<String>()
-                    .systemPrompt("""
-                        Extract the person's name and age as a JSON object {"name":…,"age":…}. \
-                        \(lastError.isEmpty ? "" : "Your previous attempt was rejected: \(lastError)")
-                        """)
+                Model<String>("""
+                    Extract the person's name and age as a JSON object {"name":…,"age":…}. \
+                    \(lastError.isEmpty ? "" : "Your previous attempt was rejected: \(lastError)")
+                    """)
                     .message(text)
             }
-            $valid.set {
-                ClientTask(input: $candidate) { json in Self.isValidPersonJSON(json) }
+            $candidate.map { json in Self.isValidPersonJSON(json) }
+                .assign(to: $valid)
+            $candidate.map { json in
+                Self.isValidPersonJSON(json) ? "" : "expected a JSON object with name and age"
             }
-            $lastError.set {
-                ClientTask(input: $candidate) { json in
-                    Self.isValidPersonJSON(json) ? "" : "expected a JSON object with name and age"
-                }
-            }
-            $attempts.set {
-                ClientTask(input: $attempts) { $0 + 1 }
-            }
+            .assign(to: $lastError)
+            $attempts.map { $0 + 1 }.assign(to: $attempts)
         }
-        $candidate.get()
+        $candidate
     }
 
     /// Accepts only a JSON object carrying both `name` and `age`.

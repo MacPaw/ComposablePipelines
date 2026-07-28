@@ -9,17 +9,18 @@
 import Foundation
 import PipelineAST
 
-/// A model call decorated with a context-producing pipeline.
+/// A model call decorated with one or more context-producing pipelines.
+///
+/// Each `.context { }` call appends a new source; all sources are concatenated in order
+/// at runtime and injected into the model as `ModelArgument.contextItems`.
 public struct ModelContextStep<
-    ContextPipeline: Pipeline,
     Input: Sendable & Codable & Hashable,
     Output: ModelOutput
->: Pipeline, PipelineStructuralNode where ContextPipeline.Output == [ContextItem] {
+>: Pipeline, PipelineStructuralNode {
     public typealias Body = Never
 
-    let contextPipeline: ContextPipeline
+    let contexts: [(slotID: UUID, graph: PipelineGraph)]
     let model: ModelStep<Input, Output>
-    let contextSlotID: UUID
 
     public var body: Never {
         fatalError("ModelContextStep is a structural node")
@@ -30,41 +31,62 @@ public struct ModelContextStep<
             outputTypeName: model.config.outputTypeName,
             traits: model.config.traits,
             streamingReplySlotID: model.config.streamingReplySlotID,
-            contextItemsSlotID: contextSlotID
+            contextItemsSlotIDs: model.config.contextItemsSlotIDs + contexts.map(\.slotID),
+            priorTurnsSlotID: model.config.priorTurnsSlotID
         )
-        return .sequence([
+        var items: [PipelineGraph] = contexts.map { (slotID, graph) in
             .leaf(
                 .executionStateSet(
-                    id: contextSlotID,
+                    id: slotID,
                     valueTypeName: String(describing: [ContextItem].self),
-                    value: contextPipeline.pipelineGraph,
+                    value: graph,
                     debugLabel: "modelContext",
                     writeKind: .draft
                 )
-            ),
-            .leaf(.model(config: config, arguments: model.arguments)),
-        ])
+            )
+        }
+        items.append(.leaf(.model(config: config, arguments: model.arguments)))
+        return .sequence(items)
+    }
+}
+
+public extension ModelContextStep {
+    /// Appends another context source. All sources are concatenated in declaration order.
+    ///
+    /// ```swift
+    /// Model<String>.chat(systemPrompt: "Use memory and today's date")
+    ///     .message(userMessage)
+    ///     .context { Memory.recall(userMessage) }
+    ///     .context { Manual([dateItem]) }
+    /// ```
+    func context<CP: Pipeline>(
+        @PipelineBuilder _ content: () -> CP
+    ) -> ModelContextStep<Input, Output>
+    where CP.Output == [ContextItem] {
+        ModelContextStep(
+            contexts: contexts + [(UUID(), content().pipelineGraph)],
+            model: model
+        )
     }
 }
 
 public extension ModelStep {
-    /// Decorates this model call with context produced by another pipeline.
+    /// Decorates this model call with a context-producing pipeline.
     ///
+    /// Chain multiple `.context { }` calls to accumulate sources:
     /// ```swift
     /// Model<String>.chat(systemPrompt: "Use relevant memory")
     ///     .message(userMessage)
-    ///     .context {
-    ///         Memory.recall(userMessage)
-    ///     }
+    ///     .context { Memory.recall(userMessage) }
+    ///     .context { Manual([dateItem]) }
     /// ```
-    func context<ContextPipeline: Pipeline>(
-        @PipelineBuilder _ content: () -> ContextPipeline
-    ) -> ModelContextStep<ContextPipeline, Input, Output>
-    where ContextPipeline.Output == [ContextItem] {
+    func context<CP: Pipeline>(
+        @PipelineBuilder _ content: () -> CP
+    ) -> ModelContextStep<Input, Output>
+    where CP.Output == [ContextItem] {
         ModelContextStep(
-            contextPipeline: content(),
-            model: self,
-            contextSlotID: UUID()
+            contexts: [(UUID(), content().pipelineGraph)],
+            model: self
         )
     }
 }

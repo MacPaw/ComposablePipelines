@@ -92,6 +92,18 @@ private enum PseudoSwiftEmitter {
 
     private static func leafExpression(_ leaf: PipelineGraphLeaf) -> String {
         switch leaf {
+        case let .router(queryGraph, _):
+            let inner = emit(queryGraph, indent: 0).joined(separator: " ")
+            return "Router { \(inner) }"
+
+        case let .dagPlan(queryGraph, tools, hints):
+            let inner = emit(queryGraph, indent: 0).joined(separator: " ")
+            return "DAGPlanner(tools: \(tools.count), hints: \(hints.count)) { \(inner) }"
+
+        case let .relevanceRank(queryGraph, tools, threshold, topK):
+            let inner = emit(queryGraph, indent: 0).joined(separator: " ")
+            return "RelevanceRanker(tools: \(tools.count), threshold: \(threshold), topK: \(topK)) { \(inner) }"
+
         case let .model(config, arguments):
             let escOut = config.outputTypeName
                 .replacingOccurrences(of: "\\", with: "\\\\")
@@ -128,20 +140,29 @@ private enum PseudoSwiftEmitter {
             let name = label ?? id.uuidString
             return "stateValue(\"\(name)\")"
 
+        case let .executionStateFrozenSet(id, _, label, _):
+            let name = label ?? id.uuidString
+            return "frozenStateSet(\"\(name)\")"
+
         case let .opaque(typeName):
             return "\(typeName)()"
         case let .clientAction(taskID, inputGraph):
             let inner = emit(inputGraph, indent: 0).joined(separator: " ")
             return "clientAction(taskID: \"\(taskID.uuidString)\", input: \(inner))"
+        case let .combine(parts):
+            let inner = parts
+                .map { emit($0, indent: 0).joined(separator: " ") }
+                .joined(separator: ", ")
+            return "combine(\(inner))"
         case let .contextProvide(providerID, queryGraph):
             let inner = emit(queryGraph, indent: 0).joined(separator: " ")
             return "contextProvide(providerID: \"\(providerID.uuidString)\", query: \(inner))"
         case let .memoryQuery(quality, queryGraph):
             let inner = emit(queryGraph, indent: 0).joined(separator: " ")
             return "memory.recall(quality: .\(quality.rawValue), query: \(inner))"
-        case let .memoryStore(planGraph):
+        case let .memoryStore(planGraph, mode):
             let inner = emit(planGraph, indent: 0).joined(separator: " ")
-            return "memory.store(plan: \(inner))"
+            return "memory.store(mode: .\((mode ?? .sync).rawValue), plan: \(inner))"
         }
     }
 

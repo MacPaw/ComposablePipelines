@@ -59,13 +59,22 @@ extension SlotAccess {
 
     private static func walkLeaf(_ leaf: PipelineGraphLeaf, into access: inout SlotAccess) {
         switch leaf {
+        case let .router(query, _):
+            walk(query, into: &access)
+
+        case let .dagPlan(query, _, _):
+            walk(query, into: &access)
+
+        case let .relevanceRank(query, _, _, _):
+            walk(query, into: &access)
+
         case let .model(config, _):
-            if let id = config.contextItemsSlotID { access.reads.insert(id) }
+            for id in config.contextItemsSlotIDs { access.reads.insert(id) }
             if let id = config.priorTurnsSlotID { access.reads.insert(id) }
             if let id = config.streamingReplySlotID { access.writes.insert(id) }
 
         case let .modelInput(config, _, input):
-            if let id = config.contextItemsSlotID { access.reads.insert(id) }
+            for id in config.contextItemsSlotIDs { access.reads.insert(id) }
             if let id = config.streamingReplySlotID { access.writes.insert(id) }
             walk(input, into: &access)
 
@@ -82,8 +91,18 @@ extension SlotAccess {
         case let .executionStateGet(id, _, _, _):
             access.reads.insert(id)
 
+        case let .executionStateFrozenSet(id, _, _, _):
+            // Treat as a write so that the compiler preserves ordering edges (RAW/WAW) to
+            // subsequent reads of the same slot — matching the semantics of the unfrozen
+            // `executionStateSet` it replaced. Without this, the topological sort
+            // parallelizes this node with explicit `$binding.get()` reads of the same slot.
+            access.writes.insert(id)
+
         case let .clientAction(_, input):
             walk(input, into: &access)
+
+        case let .combine(parts):
+            for part in parts { walk(part, into: &access) }
 
         case let .contextProvide(_, query):
             walk(query, into: &access)
@@ -91,7 +110,7 @@ extension SlotAccess {
         case let .memoryQuery(_, query):
             walk(query, into: &access)
 
-        case let .memoryStore(plan):
+        case let .memoryStore(plan, _):
             walk(plan, into: &access)
 
         case .opaque:

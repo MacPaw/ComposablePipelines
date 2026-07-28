@@ -58,7 +58,7 @@ final class ExecutionEngineParallelizationTests: XCTestCase {
             outputTypeName: "String",
             traits: [],
             streamingReplySlotID: nil,
-            contextItemsSlotID: readingSlot
+            contextItemsSlotIDs: readingSlot.map { [$0] } ?? []
         )
         return .leaf(.model(config: config, arguments: ["systemPrompt": .systemPrompt(instructions)]))
     }

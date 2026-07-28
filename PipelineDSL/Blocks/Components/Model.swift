@@ -66,6 +66,46 @@ public struct Model<Output: ModelOutput>: Sendable {
         self.init(requirements: .init(backend: backend, traits: traits))
     }
 
+    /// Unlabeled system prompt — the shortest spelling for the common case:
+    ///
+    /// ```swift
+    /// Model<String>("Extract the 5 key points.").input { $document }
+    /// ```
+    public init(_ systemPrompt: String, requirements: ModelSelectionRequirements = .default) {
+        self.init(requirements: requirements)
+        self = self.systemPrompt(systemPrompt)
+    }
+
+    /// Pins the generated output type at the call site instead of via the generic parameter —
+    /// mirrors FoundationModels' `respond(generating:)`:
+    ///
+    /// ```swift
+    /// Model("Review the brief.", generating: Review.self).input { $draft }
+    /// ```
+    public init(
+        _ systemPrompt: String,
+        generating _: Output.Type,
+        requirements: ModelSelectionRequirements = .default
+    ) {
+        self.init(systemPrompt, requirements: requirements)
+    }
+
+    /// Multi-line system prompt via ``InstructionsBuilder`` — one string per line, no `"""` walls:
+    ///
+    /// ```swift
+    /// Model<String> {
+    ///     "Write a research brief from these notes."
+    ///     "Cite every fact you use."
+    /// }
+    /// .input { $notes }
+    /// ```
+    public init(
+        requirements: ModelSelectionRequirements = .default,
+        @InstructionsBuilder _ systemPrompt: () -> String
+    ) {
+        self.init(systemPrompt(), requirements: requirements)
+    }
+
     // MARK: Builder methods
 
     /// Adds a custom or provider-specific argument (e.g. `enable_thinking`, `today`).
@@ -99,7 +139,7 @@ public struct Model<Output: ModelOutput>: Sendable {
             outputTypeName: config.outputTypeName,
             traits: value.traits,
             streamingReplySlotID: config.streamingReplySlotID,
-            contextItemsSlotID: config.contextItemsSlotID,
+            contextItemsSlotIDs: config.contextItemsSlotIDs,
             priorTurnsSlotID: config.priorTurnsSlotID
         )
         return copy
@@ -109,6 +149,11 @@ public struct Model<Output: ModelOutput>: Sendable {
         var copy = self
         copy.arguments[ModelArgument.systemPrompt("").key] = .systemPrompt(value)
         return copy
+    }
+
+    /// Multi-line system prompt via ``InstructionsBuilder``.
+    public func systemPrompt(@InstructionsBuilder _ value: () -> String) -> Self {
+        systemPrompt(value())
     }
 
     public func tools(_ value: [ToolDescriptor]) -> Self {
@@ -130,14 +175,14 @@ public struct Model<Output: ModelOutput>: Sendable {
     }
 
     /// Registers a context-items binding: the engine reads `[ContextItem]` from the binding's slot
-    /// at execution time and injects it as ``ModelArgument/contextItems(_:)`` before calling the resource.
+    /// at execution time and appends it to any context already registered via `.context { }`.
     public func contextItems(_ binding: Binding<[ContextItem]>) -> Self {
         var copy = self
         copy.config = ModelConfig(
             outputTypeName: config.outputTypeName,
             traits: config.traits,
             streamingReplySlotID: config.streamingReplySlotID,
-            contextItemsSlotID: binding.id,
+            contextItemsSlotIDs: config.contextItemsSlotIDs + [binding.id],
             priorTurnsSlotID: config.priorTurnsSlotID
         )
         return copy
@@ -158,7 +203,7 @@ public struct Model<Output: ModelOutput>: Sendable {
             outputTypeName: config.outputTypeName,
             traits: config.traits,
             streamingReplySlotID: config.streamingReplySlotID,
-            contextItemsSlotID: config.contextItemsSlotID,
+            contextItemsSlotIDs: config.contextItemsSlotIDs,
             priorTurnsSlotID: binding.id
         )
         return copy

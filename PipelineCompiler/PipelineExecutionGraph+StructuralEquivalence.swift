@@ -12,12 +12,16 @@ extension PipelineExecutionGraph.Operation {
     /// Discriminator for re-exec suffix drift checks (ignores payloads such as constant JSON).
     public var structuralShapeTag: String {
         switch self {
+        case .router: return "router"
+        case .dagPlan: return "dagPlan"
+        case .relevanceRank: return "relevanceRank"
         case .model: return "model"
         case .modelInput: return "modelInput"
         case .summarize: return "summarize"
         case .stateGet: return "stateGet"
         case .stateSet: return "stateSet"
         case .clientAction: return "clientAction"
+        case .combine: return "combine"
         case .contextProvide: return "contextProvide"
         case .memoryQuery: return "memoryQuery"
         case .memoryStore: return "memoryStore"

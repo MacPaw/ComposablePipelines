@@ -235,6 +235,7 @@ public final class PipelineWalker {
             // surface work — an all-skipped pass means the graph hasn't progressed beyond
             // what we already returned, so the prior final value is still authoritative.
             let surfaceWork = await context.surfaceTaskExecuteCount()
+            logger.log(.verbose, "pass \(depth): skip=\(activeSkip) work=\(surfaceWork) result=\(String(decoding: result.prefix(80), as: UTF8.self))")
             if surfaceWork > 0 {
                 finalResult = result
             }
@@ -247,9 +248,20 @@ public final class PipelineWalker {
                 break
             }
 
-            // No flattened-suffix structural check here: `graphProvider` may recompile different
-            // control-flow remainders after slot commits. Prefix skip is offset-only — slot
-            // values persist across iterations, and a shrunk prefix is caught by the guard above.
+            // Key-aligned prefix skip: stop at the first position where the operation kind or
+            // slot UUID changes. Prevents overshoot when a TRUE branch has more surface tasks than
+            // the FALSE branch that replaces it on re-lowering — a positional skip count would
+            // skip into the shared suffix at a lower ordinal and drop already-executed work.
+            if nextGraph.appliedCursor == nil {
+                let consumed = await context.consumedOrdinalsAtSchedule()
+                let aligned = PipelineExecutionGraph.alignedPrefixCount(
+                    previous: currentGraph,
+                    consumed: consumed,
+                    next: nextGraph.graph
+                )
+                logger.log(.verbose, "  → consumed=\(consumed) aligned=\(aligned)")
+                await context.overridePendingSkipCount(aligned)
+            }
 
             depth += 1
             await context.emit(.reexecutionStarted(depth: depth))
@@ -258,7 +270,7 @@ public final class PipelineWalker {
             await context.beginNewIteration()
         }
 
-        logger.log(.verbose, "pipeline-run - \(timer.nanoseconds().prettyDuration)")
+        logger.log(.verbose, "pipeline-run - \(timer.nanoseconds().prettyDuration) finalResult=\(String(decoding: finalResult.prefix(80), as: UTF8.self))")
         await context.emit(.executionCompleted)
         return finalResult
     }

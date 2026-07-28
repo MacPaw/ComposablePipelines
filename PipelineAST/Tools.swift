@@ -12,7 +12,7 @@ import Foundation
 
 /// Minimal JSON-schema-ish shape sufficient for tool calling.
 /// Intentionally tiny: add cases only when needed.
-public indirect enum JSONSchema: Codable, Sendable, Equatable {
+public indirect enum JSONSchema: Codable, Sendable, Equatable, Hashable {
     case object(properties: [String: JSONSchema], required: [String] = [])
     case array(items: JSONSchema)
     case string
@@ -23,7 +23,7 @@ public indirect enum JSONSchema: Codable, Sendable, Equatable {
     case oneOf([JSONSchema])
 }
 
-public struct ToolDescriptor: Codable, Sendable, Equatable {
+public struct ToolDescriptor: Codable, Sendable, Equatable, Hashable {
     public let name: String
     public let description: String
     public let inputSchema: JSONSchema

@@ -20,20 +20,16 @@ struct DocumentSummaryPipeline: Pipeline {
     @State var summary: String = ""
 
     var body: some Pipeline {
-        $keyPoints.set {
-            Model<String>()
-                .systemPrompt("Extract the 5 most important points from this document")
-                .message(document)
-        }
+        Model<String>("Extract the 5 most important points from this document")
+            .message(document)
+            .assign(to: $keyPoints)
 
-        $draft.set {
-            Model<String>()
-                .systemPrompt("Write a comprehensive summary based on these key points")
-                .input { $keyPoints.get() }
-        }
+        Model<String>("Write a comprehensive summary based on these key points")
+            .input { $keyPoints }
+            .assign(to: $draft)
 
         Group {
-            $summary.set { Summarize(text: $draft, maxTokens: 512) }
+            Summarize(text: $draft, maxTokens: 512).assign(to: $summary)
         }
     }
 }

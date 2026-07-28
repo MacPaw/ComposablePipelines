@@ -29,31 +29,25 @@ struct DemoArticlePipeline: Pipeline {
     @State var polished: String = ""
 
     var body: some Pipeline {
-        $draft.set {
-            Model<String>()
-                .systemPrompt("Write a single short, punchy paragraph about the topic. "
-                    + "Respond with only the paragraph — no preamble, no options, no headings.")
-                .maxTokens(4096)
-                .message(topic)
-        }
+        Model<String>("Write a single short, punchy paragraph about the topic. "
+            + "Respond with only the paragraph — no preamble, no options, no headings.")
+            .maxTokens(4096)
+            .message(topic)
+            .assign(to: $draft)
 
-        $revised.set {
-            Model<String>()
-                .systemPrompt("Rewrite the following paragraph to be clearer and more engaging. "
-                    + "Respond with only the rewritten paragraph — no preamble, no options, no commentary.")
-                .maxTokens(4096)
-                .input { $draft.get() }
-        }
+        Model<String>("Rewrite the following paragraph to be clearer and more engaging. "
+            + "Respond with only the rewritten paragraph — no preamble, no options, no commentary.")
+            .maxTokens(4096)
+            .input { $draft }
+            .assign(to: $revised)
 
-        $polished.set {
-            Model<String>()
-                .systemPrompt("Polish the following paragraph: tighten the wording and fix any awkward phrasing. "
-                    + "Respond with only the final paragraph — no preamble or commentary.")
-                .maxTokens(4096)
-                .input { $revised.get() }
-        }
+        Model<String>("Polish the following paragraph: tighten the wording and fix any awkward phrasing. "
+            + "Respond with only the final paragraph — no preamble or commentary.")
+            .maxTokens(4096)
+            .input { $revised }
+            .assign(to: $polished)
 
-        $polished.get()
+        $polished
     }
 }
 

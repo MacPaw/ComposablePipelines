@@ -15,8 +15,8 @@ import PipelineAST
 /// call, which the walker turns into an empty-string fallback — fine for structural traces,
 /// useless for asserting produced values.) Guardrails pass by default.
 ///
-/// `ClientTask` closures are *not* routed here — they are captured at lowering and run as
-/// written, so only `Model`/`Guardrail` steps need scripting.
+/// `Run` (client task) closures are *not* routed here — they are captured at lowering and run
+/// as written, so only `Model`/`Guardrail` steps need scripting.
 struct ScriptedExecutor: Executor {
 
     /// One resolved model invocation. Inputs are decoded best-effort to `String` for routing.

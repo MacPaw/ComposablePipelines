@@ -181,6 +181,13 @@ struct GraphWalker: Sendable {
 
 private extension GraphWalker {
 
+    /// Operation labels worth tracing when they appear as a *nested* task (inside a
+    /// `$slot.set { … }` value subgraph). Plumbing ops (constant / stateGet / stateSet)
+    /// are intentionally excluded to keep nested logging meaningful.
+    static let tracedNestedLabels: Set<String> = [
+        "model", "router", "dagPlan", "relevanceRank", "clientAction", "summarize", "memoryQuery", "memoryStore",
+    ]
+
     func executeTaskCounting(
         _ task: PipelineExecutionGraph.Task,
         parallelBranchIndex: Int?,
@@ -324,13 +331,19 @@ private extension GraphWalker {
             return (out, nested)
 
         case .model(let config, var arguments):
-            if let slotID = config.contextItemsSlotID,
-               let data = await context.getSlot(slotID) {
-                do {
-                    let items = try JSONDecoder().decode([ContextItem].self, from: data)
-                    arguments[.contextItems] = .contextItems(items)
-                } catch {
-                    throw ExecutionError.contextItemsDecodingFailed(slotID: slotID, underlyingError: error)
+            if !config.contextItemsSlotIDs.isEmpty {
+                var allItems: [ContextItem] = []
+                for slotID in config.contextItemsSlotIDs {
+                    guard let data = await context.getSlot(slotID) else { continue }
+                    do {
+                        let items = try JSONDecoder().decode([ContextItem].self, from: data)
+                        allItems.append(contentsOf: items)
+                    } catch {
+                        throw ExecutionError.contextItemsDecodingFailed(slotID: slotID, underlyingError: error)
+                    }
+                }
+                if !allItems.isEmpty {
+                    arguments[.contextItems] = .contextItems(allItems)
                 }
             }
             if let slotID = config.priorTurnsSlotID,
@@ -359,13 +372,19 @@ private extension GraphWalker {
             arguments[.message] = .message(
                 try JSONDecoder().decode(JSONValue.self, from: input)
             )
-            if let slotID = config.contextItemsSlotID,
-               let data = await context.getSlot(slotID) {
-                do {
-                    let items = try JSONDecoder().decode([ContextItem].self, from: data)
-                    arguments[.contextItems] = .contextItems(items)
-                } catch {
-                    throw ExecutionError.contextItemsDecodingFailed(slotID: slotID, underlyingError: error)
+            if !config.contextItemsSlotIDs.isEmpty {
+                var allItems: [ContextItem] = []
+                for slotID in config.contextItemsSlotIDs {
+                    guard let data = await context.getSlot(slotID) else { continue }
+                    do {
+                        let items = try JSONDecoder().decode([ContextItem].self, from: data)
+                        allItems.append(contentsOf: items)
+                    } catch {
+                        throw ExecutionError.contextItemsDecodingFailed(slotID: slotID, underlyingError: error)
+                    }
+                }
+                if !allItems.isEmpty {
+                    arguments[.contextItems] = .contextItems(allItems)
                 }
             }
             let onDelta = await makeModelDeltaSink(modelTaskID: modelTaskID)
@@ -374,6 +393,47 @@ private extension GraphWalker {
                 return (out, nested)
             } catch ExecutorError.noBackend {
                 return (.emptyJSON, nested)
+            }
+
+        case .router(let queryGraph, let tools):
+            let (queryValue, nested) = try await walkCountingNonSkippedTasks(
+                queryGraph,
+                parallelBranchIndex: nil,
+                logCountedSteps: subgraphLog
+            )
+            do {
+                let out = try await executor.runRouter(query: queryValue, tools: tools)
+                return (out, nested)
+            } catch ExecutorError.noBackend {
+                return (try JSONEncoder().encode(WorkflowRoute.default.rawValue), nested)
+            }
+
+        case .dagPlan(let queryGraph, let tools, let hints):
+            let (queryValue, nested) = try await walkCountingNonSkippedTasks(
+                queryGraph,
+                parallelBranchIndex: nil,
+                logCountedSteps: subgraphLog
+            )
+            do {
+                let out = try await executor.runDAGPlan(query: queryValue, tools: tools, hints: hints)
+                return (out, nested)
+            } catch ExecutorError.noBackend {
+                return (try JSONEncoder().encode(DAGPlanningResult(text: nil, dag: nil)), nested)
+            }
+
+        case .relevanceRank(let queryGraph, let tools, let threshold, let topK):
+            let (queryValue, nested) = try await walkCountingNonSkippedTasks(
+                queryGraph,
+                parallelBranchIndex: nil,
+                logCountedSteps: subgraphLog
+            )
+            do {
+                let out = try await executor.runRelevanceRank(query: queryValue, tools: tools, threshold: threshold, topK: topK)
+                return (out, nested)
+            } catch ExecutorError.noBackend {
+                // Passthrough: first topK tools at score 1.0 so the pipeline can still proceed.
+                let fallback = RelevanceRankingResult(rankedTools: Array(tools.prefix(topK)).map { RankedTool(descriptor: $0, score: 1.0) })
+                return (try JSONEncoder().encode(fallback), nested)
             }
 
         case .summarize(let slotID, _, let maxTokens):
@@ -432,6 +492,21 @@ private extension GraphWalker {
             }
             return (out, nested)
 
+        case .combine(let inputs):
+            var items: [JSONValue] = []
+            items.reserveCapacity(inputs.count)
+            var nestedTotal = 0
+            for input in inputs {
+                let (value, nested) = try await walkCountingNonSkippedTasks(
+                    input,
+                    parallelBranchIndex: nil,
+                    logCountedSteps: subgraphLog
+                )
+                nestedTotal += nested
+                items.append(try JSONDecoder().decode(JSONValue.self, from: value))
+            }
+            return (try JSONEncoder().encode(JSONValue.array(items)), nestedTotal)
+
         case .contextProvide(let providerID, let queryGraph):
             let (queryValue, nested) = try await walkCountingNonSkippedTasks(
                 queryGraph,
@@ -456,14 +531,15 @@ private extension GraphWalker {
             )
             return (out, nested)
 
-        case .memoryStore(let planGraph):
+        case .memoryStore(let planGraph, let mode):
             let (planValue, nested) = try await walkCountingNonSkippedTasks(
                 planGraph,
                 parallelBranchIndex: nil,
                 logCountedSteps: subgraphLog
             )
             let out = try await MemoryStoreOperation(context: context).execute(
-                planValue: planValue
+                planValue: planValue,
+                mode: mode
             )
             return (out, nested)
 
