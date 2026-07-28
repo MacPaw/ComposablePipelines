@@ -51,6 +51,10 @@ extension PipelineExecutionGraph {
     /// Mirrors `PipelineGraphLeaf` cases but references `PipelineExecutionGraph` subgraphs
     /// instead of nested AST trees.
     public enum Operation: Codable, Equatable, Sendable {
+        case router(query: PipelineExecutionGraph, tools: [ToolDescriptor])
+        case dagPlan(query: PipelineExecutionGraph, tools: [ToolDescriptor], hints: [String])
+        case relevanceRank(query: PipelineExecutionGraph, tools: [ToolDescriptor], threshold: Float, topK: Int)
+
         case model(config: ModelConfig, arguments: ModelArguments)
         case modelInput(
             config: ModelConfig,
@@ -76,6 +80,9 @@ extension PipelineExecutionGraph {
 
         case clientAction(taskID: UUID, input: PipelineExecutionGraph)
 
+        /// Evaluates each input subgraph in order and emits a JSON array of the results.
+        case combine(inputs: [PipelineExecutionGraph])
+
         /// Runs a ``ContextItemsProvider`` registered under `providerID`. The `query`
         /// subgraph must produce a `String`; the operation emits `[ContextItem]`.
         case contextProvide(providerID: UUID, query: PipelineExecutionGraph)
@@ -86,7 +93,7 @@ extension PipelineExecutionGraph {
 
         /// Evaluates a ``MemoryWritePlan`` and persists each entry through the
         /// registered ``MemoryProvider``.
-        case memoryStore(plan: PipelineExecutionGraph)
+        case memoryStore(plan: PipelineExecutionGraph, mode: MemoryStoreMode)
 
         case constant(valueTypeName: String, jsonUTF8: String)
     }

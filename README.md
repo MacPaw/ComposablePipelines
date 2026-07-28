@@ -257,36 +257,32 @@ struct CodingAgentPipeline: Pipeline {
 
     var body: some Pipeline {
         // The agent loop is a reactive While: it re-reads committed state each iteration.
-        While(condition: { reply.isEmpty && turns < maxTurns }) {
+        While(reply.isEmpty && turns < maxTurns) {
             // 1. Ask the model, advertising the available tools.
-            $lastTurn.set {
-                Model<ModelTurn>()
-                    .tools(tools.map(\.descriptor))
-                    .systemPrompt(systemPrompt)
-                    .input { $transcript.get() }
-            }
+            Model<ModelTurn>(systemPrompt)
+                .tools(tools.map(\.descriptor))
+                .input { $transcript }
+                .assign(to: $lastTurn)
             // 2. Run whatever tools the model called; append the results to the transcript.
-            $transcript.set {
-                ClientTask(input: $lastTurn) { turn in
-                    guard let calls = turn.toolCalls, !calls.isEmpty else { return transcript }
-                    var updated = transcript
-                    for call in calls {
-                        let output = try await ToolRegistry(tools).executeJSON(
-                            toolName: call.name, inputJSON: Data(call.arguments.utf8))
-                        updated += "\n[\(call.name)] " + String(decoding: output, as: UTF8.self)
-                    }
-                    return updated
+            Run($lastTurn) { turn in
+                guard let calls = turn.toolCalls, !calls.isEmpty else { return transcript }
+                var updated = transcript
+                for call in calls {
+                    let output = try await ToolRegistry(tools).executeJSON(
+                        toolName: call.name, inputJSON: Data(call.arguments.utf8))
+                    updated += "\n[\(call.name)] " + String(decoding: output, as: UTF8.self)
                 }
+                return updated
             }
+            .assign(to: $transcript)
             // 3. A turn with tool calls keeps looping; a tool-free turn is the final answer.
-            $reply.set {
-                ClientTask(input: $lastTurn) { turn in
-                    (turn.toolCalls?.isEmpty == false) ? "" : (turn.reply ?? "")
-                }
+            Run($lastTurn) { turn in
+                (turn.toolCalls?.isEmpty == false) ? "" : (turn.reply ?? "")
             }
-            $turns.set { ClientTask(input: $turns) { $0 + 1 } }
+            .assign(to: $reply)
+            $turns.map { $0 + 1 }.assign(to: $turns)
         }
-        $reply.get()
+        $reply
     }
 }
 ```
@@ -296,8 +292,8 @@ struct CodingAgentPipeline: Pipeline {
 - **A loop is a primitive, not a special case.** The agent's turn loop is a `While` whose condition
   reads ordinary `@State`. Because state writes advance epochs, the walker re-lowers and re-runs
   only what changed each iteration — no bespoke agent runtime required.
-- **Tools are client work, expressed as `ClientTask`.** The model returns a `ModelTurn` carrying
-  `toolCalls`; a `ClientTask` dispatches them through a `ToolRegistry` and folds the results back
+- **Tools are client work, expressed as `Run`.** The model returns a `ModelTurn` carrying
+  `toolCalls`; a `Run` step dispatches them through a `ToolRegistry` and folds the results back
   into state. Model steps and client steps compose in the same graph.
 - **Client-side vs. host-side tools.** The file/`bash` tools are `ModelTool`s — locally executed
   through the registry. The framework also models `AgentTool`s — descriptor-only tools a host
@@ -319,7 +315,7 @@ struct CodingAgentPipeline: Pipeline {
 
 - [Getting started](docs/getting-started.md) — install, your first pipeline, compile + walk.
 - [Primitives](docs/primitives.md) — `Model`, `Guardrail`, `While`, `Group`, `ForEach`,
-  `Summarize`, `ClientTask`, `@State`, and native control flow, with examples.
+  `Summarize`, `Run` (client tasks), `@State`, and native control flow, with examples.
 - [Executors](docs/executors.md) — the `Executor` seam in depth: `ExecutionValue` encoding,
   observation, errors and fallbacks.
 - [Architecture](docs/architecture.md) — AST → compiler → walker, epochs and incremental
@@ -329,24 +325,6 @@ struct CodingAgentPipeline: Pipeline {
   self-healing retry loop, and a tool-calling agent loop. (Source in [`Examples/`](Examples/).)
 - [Technical note](https://research.macpaw.com/publications/composable-ai-pipelines) — the design
   and rationale behind Composable AI Pipelines.
-
-## Citation
-
-If you use Composable Pipelines in your research, please cite the accompanying technical note:
-
-> Maksym Kotliar. **Composable AI Pipelines: Write Intent, Not Infrastructure.** MacPaw Research,
-> 18 May 2026. https://research.macpaw.com/publications/composable-ai-pipelines
-
-```bibtex
-@techreport{kotliar2026composable,
-  title        = {Composable AI Pipelines: Write Intent, Not Infrastructure},
-  author       = {Kotliar, Maksym},
-  institution  = {MacPaw Research},
-  year         = {2026},
-  month        = may,
-  url          = {https://research.macpaw.com/publications/composable-ai-pipelines}
-}
-```
 
 ## License
 

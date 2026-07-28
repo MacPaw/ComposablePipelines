@@ -12,6 +12,18 @@ public enum PipelineBuilder {
         EmptyPipeline()
     }
 
+    // MARK: - Expressions
+
+    public static func buildExpression<T: Pipeline>(_ expression: T) -> T {
+        expression
+    }
+
+    /// A bare `$binding` statement is a graph-level slot read — sugar for `$binding.get()`.
+    /// Most useful as the last line of a body, where it makes the slot the pipeline's output.
+    public static func buildExpression<Value>(_ binding: Binding<Value>) -> Binding<Value>.GetValue {
+        binding.get()
+    }
+
     public static func buildPartialBlock<First: Pipeline>(first: First) -> First {
         first
     }

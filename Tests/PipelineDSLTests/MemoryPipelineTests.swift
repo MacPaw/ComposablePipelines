@@ -78,17 +78,18 @@ final class MemoryPipelineTests: XCTestCase {
             XCTFail("expected model call")
             return
         }
-        XCTAssertEqual(config.contextItemsSlotID, contextSlotID)
+        XCTAssertEqual(config.contextItemsSlotIDs, [contextSlotID])
     }
 
     func testStoreEntryLowersToMemoryStoreLeaf() throws {
         let entry = MemoryEntry(id: "goal", text: "Ship the release")
         let graph = Memory.store(entry).pipelineGraph
 
-        guard case let .leaf(.memoryStore(planGraph)) = graph else {
+        guard case let .leaf(.memoryStore(planGraph, mode)) = graph else {
             XCTFail("expected memoryStore leaf")
             return
         }
+        XCTAssertEqual(mode ?? .sync, .sync)
         guard case let .leaf(.just(_, jsonUTF8)) = planGraph else {
             XCTFail("expected constant memory write plan")
             return
@@ -106,12 +107,24 @@ final class MemoryPipelineTests: XCTestCase {
         }
         .pipelineGraph
 
-        guard case let .leaf(.memoryStore(planGraph)) = graph,
+        guard case let .leaf(.memoryStore(planGraph, mode)) = graph,
               case let .leaf(.model(config, _)) = planGraph else {
             XCTFail("expected model-produced memory write plan")
             return
         }
+        XCTAssertEqual(mode ?? .sync, .sync)
         XCTAssertEqual(config.outputTypeName, "MemoryWritePlan")
         XCTAssertTrue(config.traits.contains(.textClassification))
+    }
+
+    func testStoreEntryCanLowerToAsyncMemoryStoreLeaf() {
+        let entry = MemoryEntry(id: "goal", text: "Ship the release")
+        let graph = Memory.store(entry, mode: .async).pipelineGraph
+
+        guard case let .leaf(.memoryStore(_, mode)) = graph else {
+            XCTFail("expected memoryStore leaf")
+            return
+        }
+        XCTAssertEqual(mode, .async as MemoryStoreMode?)
     }
 }

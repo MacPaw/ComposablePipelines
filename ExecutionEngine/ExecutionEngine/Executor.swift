@@ -39,6 +39,37 @@ public protocol Executor: Sendable {
         arguments: ModelArguments,
         onDelta: (@Sendable (String) -> Void)?
     ) async throws -> ExecutionValue
+
+    /// Route a query string through the routing model and return the encoded ``WorkflowRoute`` raw value.
+    /// - Parameters:
+    ///   - tools: ranked candidate tools available for this turn; an empty list means no tools were selected.
+    /// - Throws: ``ExecutorError/noBackend`` when no router resource is available;
+    ///   the walker falls back to ``WorkflowRoute/default``.
+    func runRouter(query: ExecutionValue, tools: [ToolDescriptor]) async throws -> ExecutionValue
+
+    /// Plan a DAG for the given query using the available tools.
+    /// - Throws: ``ExecutorError/noBackend`` when no planner resource is available;
+    ///   the walker falls back to an empty ``DAGPlanningResult``.
+    func runDAGPlan(query: ExecutionValue, tools: [ToolDescriptor], hints: [String]) async throws -> ExecutionValue
+
+    /// Rank `tools` by relevance to `query`, returning at most `topK` above `threshold`.
+    /// - Throws: ``ExecutorError/noBackend`` when no ranker resource is available;
+    ///   the walker falls back to the first `topK` tools at score 1.
+    func runRelevanceRank(query: ExecutionValue, tools: [ToolDescriptor], threshold: Float, topK: Int) async throws -> ExecutionValue
+}
+
+extension Executor {
+    public func runRouter(query: ExecutionValue, tools: [ToolDescriptor]) async throws -> ExecutionValue {
+        throw ExecutorError.noBackend
+    }
+
+    public func runDAGPlan(query: ExecutionValue, tools: [ToolDescriptor], hints: [String]) async throws -> ExecutionValue {
+        throw ExecutorError.noBackend
+    }
+
+    public func runRelevanceRank(query: ExecutionValue, tools: [ToolDescriptor], threshold: Float, topK: Int) async throws -> ExecutionValue {
+        throw ExecutorError.noBackend
+    }
 }
 
 /// Open executor for demos and tests: no real backend. Every operation reports ``ExecutorError/noBackend``

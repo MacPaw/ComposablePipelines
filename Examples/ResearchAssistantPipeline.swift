@@ -16,7 +16,7 @@ import PipelineDSL
 /// Demonstrates:
 /// - `Model<String, ModelTurn>` — a model step whose output is a structured ``ModelTurn`` (a final
 ///   `reply` and/or a set of `toolCalls`), with `tools:` advertising the available tool schemas.
-/// - Dispatching `ModelTurn.toolCalls` through a `ClientTask` against a ``ToolRegistry`` and feeding
+/// - Dispatching `ModelTurn.toolCalls` through a `Run` step against a ``ToolRegistry`` and feeding
 ///   the observations back into the transcript.
 /// - `While` driving the multi-turn agent loop, bounded by a visible `turns` counter.
 struct ResearchAssistantPipeline: Pipeline {
@@ -43,43 +43,36 @@ struct ResearchAssistantPipeline: Pipeline {
     }
 
     var body: some Pipeline {
-        While(condition: { reply.isEmpty && turns < maxTurns }) {
+        While(reply.isEmpty && turns < maxTurns) {
             // Snapshot the committed transcript at lowering so the dispatch task can extend it.
             let priorTranscript = transcript
             let registry = ToolRegistry(tools)
 
-            $lastTurn.set {
-                Model<ModelTurn>()
-                    .tools(tools.map(\.descriptor))
-                    .systemPrompt(systemPrompt)
-                    .input { $transcript.get() }
-            }
+            Model<ModelTurn>(systemPrompt)
+                .tools(tools.map(\.descriptor))
+                .input { $transcript }
+                .assign(to: $lastTurn)
             // Run any tool calls and append their results; a turn with no tool calls leaves the
             // transcript unchanged (the model is answering, not researching).
-            $transcript.set {
-                ClientTask(input: $lastTurn) { turn in
-                    guard let calls = turn.toolCalls, !calls.isEmpty else { return priorTranscript }
-                    var updated = priorTranscript
-                    for call in calls {
-                        let output = try await registry.executeJSON(
-                            toolName: call.name,
-                            inputJSON: Data(call.arguments.utf8)
-                        )
-                        let text = (try? JSONDecoder().decode(String.self, from: output))
-                            ?? String(decoding: output, as: UTF8.self)
-                        updated += "\n[\(call.name)] \(text)"
-                    }
-                    return updated
+            Run($lastTurn) { turn in
+                guard let calls = turn.toolCalls, !calls.isEmpty else { return priorTranscript }
+                var updated = priorTranscript
+                for call in calls {
+                    let output = try await registry.executeJSON(
+                        toolName: call.name,
+                        inputJSON: Data(call.arguments.utf8)
+                    )
+                    let text = (try? JSONDecoder().decode(String.self, from: output))
+                        ?? String(decoding: output, as: UTF8.self)
+                    updated += "\n[\(call.name)] \(text)"
                 }
+                return updated
             }
-            $reply.set {
-                ClientTask(input: $lastTurn) { turn in turn.reply ?? "" }
-            }
-            $turns.set {
-                ClientTask(input: $turns) { $0 + 1 }
-            }
+            .assign(to: $transcript)
+            $lastTurn.map { turn in turn.reply ?? "" }.assign(to: $reply)
+            $turns.map { $0 + 1 }.assign(to: $turns)
         }
-        $reply.get()
+        $reply
     }
 }
 

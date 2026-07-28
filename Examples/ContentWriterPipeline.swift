@@ -27,41 +27,35 @@ struct ContentWriterPipeline: Pipeline {
             topic,
             rules: [.pii],
             allowed: {
+                // Prompt bakes bare `tone` (@State) → closure form captures that read.
                 $draft.set {
-                    Model<String>()
-                        .systemPrompt("Write a \(tone) article about the given topic. 3-4 paragraphs.")
-                        .input { $topic.get() }
+                    Model<String>("Write a \(tone) article about the given topic. 3-4 paragraphs.")
+                        .input { $topic }
                 }
 
                 $tone.set("toxic")
 
                 // Parallel critique — three independent reviewers
-                $grammarNotes.set {
-                    Model<String>()
-                        .systemPrompt("Review for grammar and clarity issues only. Be concise.")
-                        .input { $draft.get() }
-                }
+                Model<String>("Review for grammar and clarity issues only. Be concise.")
+                    .input { $draft }
+                    .assign(to: $grammarNotes)
                 $styleNotes.set {
-                    Model<String>()
-                        .systemPrompt("Review tone and style. Does it match '\(tone)'? Be concise.")
-                        .input { $draft.get() }
+                    Model<String>("Review tone and style. Does it match '\(tone)'? Be concise.")
+                        .input { $draft }
                 }
-                $factNotes.set {
-                    Model<String>()
-                        .systemPrompt("Flag any unsupported claims or factual concerns. Be concise.")
-                        .input { $draft.get() }
-                }
+                Model<String>("Flag any unsupported claims or factual concerns. Be concise.")
+                    .input { $draft }
+                    .assign(to: $factNotes)
 
-                // Rewrite incorporating all feedback
+                // Rewrite incorporating all feedback — bakes bare notes (@State), so closure form.
                 $finalDraft.set {
-                    Model<String>()
-                        .systemPrompt("""
-                            Rewrite this draft incorporating the following feedback:\n\
-                            Grammar: \(grammarNotes)\n\
-                            Style: \(styleNotes)\n\
-                            Facts: \(factNotes)
-                            """)
-                        .input { $draft.get() }
+                    Model<String> {
+                        "Rewrite this draft incorporating the following feedback:"
+                        "Grammar: \(grammarNotes)"
+                        "Style: \(styleNotes)"
+                        "Facts: \(factNotes)"
+                    }
+                    .input { $draft }
                 }
             },
             blocked: {

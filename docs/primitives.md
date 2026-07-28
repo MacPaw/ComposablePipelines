@@ -7,10 +7,10 @@ examples. All examples assume `import ComposablePipelines`.
 - [`@State` and bindings](#state)
 - [`Model`](#model)
 - [`Guardrail`](#guardrail)
-- [`ClientTask`](#clienttask)
+- [`Run` (client tasks)](#run)
 - [`While`](#while)
 - [`ForEach`](#foreach)
-- [`Group`](#group)
+- [`Group`](#group) (and `Concurrent` / `Barrier`)
 - [`Summarize`](#summarize)
 - [`Just`](#just)
 - [Native control flow](#native-control-flow)
@@ -44,7 +44,7 @@ struct Greeting: Pipeline {
 ```
 
 The `Output` of a builder block is the **last step's output**. Leaf steps such as `Model` and
-`ClientTask` pin their own `Output` via generics.
+`Run` pin their own `Output` via generics.
 
 Steps do **not** receive each other's typed results as inputs — dataflow goes through
 [`@State`](#state).
@@ -109,6 +109,22 @@ struct DocumentSummary: Pipeline {
 **Write kinds.** `.commit` (default) participates in incremental re-execution — after the
 write, the body re-evaluates and the compiler can produce a new graph. `.draft` updates the
 runner slot without triggering re-evaluation (useful for streaming partials).
+
+**`.assign(to:)` vs `.set { }`.** `producer.assign(to: $slot)` is the producer-first spelling of
+the *value* form `$slot.set(producer)`. It's the right tool when the producer's dependencies are
+**graph-encoded** — `.input { $other }`, `Run`, `$x.map { … }`, constants, or plain `let`s.
+It **cannot** capture a bare `@State` read made *while building* the producer (e.g.
+`Model("…").message(keyPoints)` or a prompt interpolating `\(severity)`), because a postfix
+modifier can't snapshot reads before the producer was constructed. For those, use the closure
+form `$slot.set { producer }`, which snapshots reads up front and records the dependency:
+
+```swift
+// graph-encoded dependency → .assign is fine
+Model<String>("Summarize.").input { $keyPoints }.assign(to: $draft)
+
+// producer bakes a bare @State read → use the closure form so the dependency is captured
+$draft.set { Model<String>("Summarize \(topicTone) style.").message(keyPoints) }
+```
 
 > `@State` defaults are baked into the compiled graph, so you don't have to seed them through
 > `initialSlots` when running.
@@ -205,37 +221,73 @@ var body: some Pipeline {
 }
 ```
 
+Rules read as a variadic list on `GuardrailClassification` (the `Bool`-producing classifier)
+and on `GateGuardrail` (a bare gate over one input), so you skip the `rules:` label and the
+array brackets:
+
+```swift
+GuardrailClassification(.politics, .pii) { $message.get() }   // -> Bool
+GateGuardrail(.politics, .pii) { $message.get() }             // gate; proceeds only if it passes
+```
+
 ---
 
-## `ClientTask`
+## `Run`
 
 Runs a closure on the host/client — the boundary for outside-world access (files, network,
 secrets, UI). The graph records *that* a task runs (by `taskID`); the host decides *how*.
+`ClientTask` is the previous name and remains available as a typealias.
 
 ```swift
-// input pipeline + async action
+// one binding in — Input from the binding, Output from the closure
+public init(id: String? = nil, _ input: Binding<Input>,
+            action: @escaping @Sendable (Input) async throws -> Output)
+
+// two / three bindings in — the input lowers to a `combine` leaf and arrives together
+public init<A, B>(id: String? = nil, _ first: Binding<A>, _ second: Binding<B>,
+                  action: @escaping @Sendable (A, B) async throws -> Output)
+    where Input == Combined2<A, B>
+
+// no input
+public init(taskID: UUID = UUID(),
+            action: @escaping @Sendable () async throws -> Output) where Input == Never
+public init(id: String,
+            action: @escaping @Sendable () async throws -> Output) where Input == Never
+
+// input pipeline + async action (general form)
 public init<InputPipeline: Pipeline>(
     taskID: UUID = UUID(),
     @PipelineBuilder input: @Sendable @escaping () -> InputPipeline,
     action: @escaping @Sendable (Input) async throws -> Output
 ) where InputPipeline.Output == Input
-
-// input binding + async action
-public init(taskID: UUID = UUID(), input: Binding<Input>,
-            action: @escaping @Sendable (Input) async throws -> Output)
-
-// no input
-public init(taskID: UUID = UUID(),
-            action: @escaping @Sendable () async throws -> Output) where Input == Never
 ```
 
 ```swift
-$wordCount.set {
-    ClientTask(input: $draft) { (text: String) async throws -> Int in
-        text.split { $0.isWhitespace || $0.isNewline }.count
-    }
+Run($draft) { text in
+    text.split(whereSeparator: \.isWhitespace).count
 }
+.assign(to: $wordCount)
+
+Run($draft, $tone) { draft, tone in applyTone(tone, to: draft) }
+    .assign(to: $draft)
+
+Run { try await fetchUserLocale() }
+    .assign(to: $locale)
 ```
+
+Pure single-slot transforms read better as `Binding.map` — it lowers to the same
+`clientAction` leaf:
+
+```swift
+$draft.map { $0.count }.assign(to: $wordCount)
+$draft.map(\.wordCount).assign(to: $summaryLength)
+```
+
+**Identity.** Closure captures never cross the wire — only the `taskID` does. The default
+`taskID` is a fresh `UUID` per value, which is fine for local runs (the lowering registers the
+closure each time). When a graph is *encoded and executed remotely*, give the task a stable
+string `id:`; both sides derive the same UUID via `UUID(stableTaskName:)`, so the host's
+`clientActionProvider` can dispatch it across lowerings and launches.
 
 When you run a graph that contains client tasks, supply a `clientActionProvider` to
 `PipelineWalker.run` so the walker can dispatch each `taskID` (see [Executors](executors.md)).
@@ -250,20 +302,23 @@ committed state write — so the loop terminates through `@State`, not a hidden 
 ```swift
 public init(condition: @Sendable @escaping () -> Bool,
             @PipelineBuilder body: @Sendable @escaping () -> Body)
+
+// autoclosure spelling — the condition expression is re-evaluated on every emission
+public init(_ condition: @autoclosure @Sendable @escaping () -> Bool,
+            @PipelineBuilder body: @Sendable @escaping () -> Body)
 ```
 
 ```swift
 @State var reply = ""
 
 var body: some Pipeline {
-    While(condition: { reply.isEmpty }) {
-        $reply.set {
-            ClientTask(input: $conversation) { raw in
-                raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            }
+    While(reply.isEmpty) {                     // autoclosure; same as condition: { reply.isEmpty }
+        $conversation.map { raw in
+            raw.trimmingCharacters(in: .whitespacesAndNewlines)
         }
+        .assign(to: $reply)
     }
-    $reply.get()
+    $reply                                     // bare binding == $reply.get()
 }
 ```
 
@@ -281,13 +336,16 @@ public init(in data: @escaping @Sendable () -> C,
 
 public init(in data: C,
             @PipelineBuilder content: @escaping @Sendable (C.Element) -> Content)
+
+// SwiftUI-parity spellings — drop the `in:` label
+public init(_ data: C, @PipelineBuilder content: @escaping @Sendable (C.Element) -> Content)
+public init(_ data: @escaping @Sendable () -> C,
+            @PipelineBuilder content: @escaping @Sendable (C.Element) -> Content)
 ```
 
 ```swift
-ForEach(in: { chunks }) { chunk in
-    $notes.set {
-        Model<String, String>(instructions: "Note the key fact.", input: Just(value: chunk))
-    }
+ForEach(chunks) { chunk in                     // no `in:` label
+    Run { noteKeyFact(in: chunk) }.assign(to: $notes)
 }
 ```
 
@@ -309,9 +367,16 @@ public init(sequential: Bool = true, gate: Bool = false,
 - `gate` (default `false`): everything *after* the group waits for it to finish, regardless of
   slot dependencies — a barrier.
 
+For the two non-default combinations, prefer the named spellings — they read at the call site
+where `Group(sequential:gate:)`'s booleans don't:
+
 ```swift
-Group(gate: true) {
-    Guardrail(rules: [.politics, .pii])   // nothing downstream starts until this clears
+Concurrent { … }        // == Group(sequential: false) — steps may run in parallel
+Barrier { … }           // == Group(gate: true) — a barrier; downstream waits
+Group { … }.gated()     // == Group(gate: true) — modifier form
+
+Barrier {
+    GateGuardrail(.politics, .pii) { $message.get() }   // nothing downstream starts until this clears
 }
 ```
 
@@ -335,7 +400,7 @@ $summary.set {
 
 ## `Just`
 
-Lifts a constant value into a pipeline — most often as a `Model`/`ClientTask` input.
+Lifts a constant value into a pipeline — most often as a `Model`/`Run` input.
 
 ```swift
 public init(value: Output)

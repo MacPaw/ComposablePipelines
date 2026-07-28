@@ -112,7 +112,7 @@ final class PipelineConstructionTests: XCTestCase {
             outputTypeName: "String",
             traits: [],
             streamingReplySlotID: nil,
-            contextItemsSlotID: nil
+            contextItemsSlotIDs: []
         )
         let graph: PipelineGraph = .leaf(.model(config: config, arguments: [
             "systemPrompt": .systemPrompt("reply"),
@@ -367,24 +367,20 @@ final class PipelineConstructionTests: XCTestCase {
 
     // MARK: - Composed guardrail
 
-    func testGuardrailClassification_lowersToTypedClassificationModel() {
+    func testGuardrailClassification_lowersToModelInputLeaf() {
         let graph = GuardrailClassification(
             "Contact me at alex@example.com",
-            rules: [.pii]
+            rules: [.illegal]
         ).pipelineGraph
 
-        guard case let .leaf(.modelInput(config, arguments, input)) = graph else {
-            return XCTFail("Expected typed model input, got \(PipelineGraphTestHelpers.prettyPrint(graph))")
+        guard case let .leaf(.modelInput(config, arguments, query)) = graph else {
+            return XCTFail("Expected modelInput leaf, got \(PipelineGraphTestHelpers.prettyPrint(graph))")
         }
         XCTAssertEqual(config.outputTypeName, "Bool")
-        XCTAssertTrue(config.traits.contains(.textClassification))
-        guard case .systemPrompt(let prompt) = arguments["systemPrompt"] else {
-            return XCTFail("Expected a classification system prompt")
-        }
-        XCTAssertTrue(prompt.contains("pii"))
-        XCTAssertFalse(prompt.contains("- politics:"))
-        guard case let .leaf(.just(valueTypeName, jsonUTF8)) = input else {
-            return XCTFail("Expected constant string input")
+        XCTAssertTrue(config.traits.contains(.guardrailClassification))
+        XCTAssertNotNil(arguments["guardrailRules"])
+        guard case let .leaf(.just(valueTypeName, jsonUTF8)) = query else {
+            return XCTFail("Expected constant string query input")
         }
         XCTAssertEqual(valueTypeName, "String")
         XCTAssertEqual(jsonUTF8, "\"Contact me at alex@example.com\"")
@@ -406,7 +402,7 @@ final class PipelineConstructionTests: XCTestCase {
     func testGuardrail_composesClassificationStateAndBranch() {
         let graph = Guardrail(
             "Hello",
-            rules: [.pii],
+            rules: [.illegal],
             allowed: { Just(value: "allowed") },
             blocked: { Just(value: "blocked") }
         ).loweredGraph()
@@ -419,9 +415,10 @@ final class PipelineConstructionTests: XCTestCase {
         }
         XCTAssertEqual(valueTypeName, "Bool")
         guard case let .leaf(.modelInput(config, _, _)) = value else {
-            return XCTFail("Expected classification model in decision write")
+            return XCTFail("Expected modelInput leaf in decision write, got \(PipelineGraphTestHelpers.prettyPrint(value))")
         }
-        XCTAssertTrue(config.traits.contains(.textClassification))
+        XCTAssertEqual(config.outputTypeName, "Bool")
+        XCTAssertTrue(config.traits.contains(.guardrailClassification))
 
         guard case let .sequence(branchItems) = items[1],
               case .group(sequential: true, gate: true, _) = branchItems.first else {
@@ -449,7 +446,7 @@ final class PipelineConstructionTests: XCTestCase {
             var body: some Pipeline {
                 Guardrail(
                     "Hello",
-                    rules: [.pii],
+                    rules: [.illegal],
                     allowed: { Just(value: "allowed") },
                     blocked: { Just(value: "blocked") }
                 )

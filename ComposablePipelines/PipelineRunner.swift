@@ -61,7 +61,12 @@ public enum PipelineRunner {
 
         // Commit batches are buffered, then applied to the DSL context inside the graphProvider
         // right before re-lowering — so the re-lowered condition/branches see exactly the committed
-        // slot values, and the engine's prefix-skip is replaced by our cursor-trimmed graph.
+        // slot values. We return the full re-lowered graph with appliedCursor: nil so the engine's
+        // key-aligned alignedPrefixCount computes the correct skip count. Trimming the graph with
+        // droppingFirstSurfaceTasks(cursor.offset) is incorrect here because cursor.offset is
+        // relative to the current (possibly already-trimmed) iteration graph, not the full graph;
+        // applying it to the full re-lowered graph under-drops the prefix and leaves already-executed
+        // tasks (e.g. route.set) in subsequent iterations, which re-run and pollute finalResult.
         return try await engine.run(
             graph: first.graph,
             clientActionProvider: { id, input in
@@ -82,11 +87,7 @@ public enum PipelineRunner {
                 }
                 let next = lowerNow()
                 registry.merge(next.actions)
-                let appliedOffset = Swift.max(0, Swift.min(cursor.offset, next.graph.surfaceTaskCount()))
-                return ReexecutionGraph(
-                    graph: next.graph.droppingFirstSurfaceTasks(appliedOffset),
-                    appliedCursor: ExecutionCursor(epoch: cursor.epoch, offset: appliedOffset)
-                )
+                return ReexecutionGraph(graph: next.graph, appliedCursor: nil)
             },
             observingExecution: observingExecution
         )

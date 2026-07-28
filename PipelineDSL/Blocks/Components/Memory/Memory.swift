@@ -94,31 +94,40 @@ public struct MemoryStore<Plan: Pipeline>: LeafPipeline where Plan.Output == Mem
     public typealias Output = MemoryWritePlan
 
     public let plan: Plan
+    public let mode: MemoryStoreMode
 
-    public init(@PipelineBuilder plan: () -> Plan) {
+    public init(mode: MemoryStoreMode = .sync, @PipelineBuilder plan: () -> Plan) {
         self.plan = plan()
+        self.mode = mode
     }
 
     public var pipelineGraph: PipelineGraph {
-        .leaf(.memoryStore(plan: plan.pipelineGraph))
+        .leaf(.memoryStore(plan: plan.pipelineGraph, mode: mode))
     }
 }
 
 extension Memory {
     public static func store<Plan: Pipeline>(
+        mode: MemoryStoreMode = .sync,
         @PipelineBuilder plan: () -> Plan
     ) -> MemoryStore<Plan> where Plan.Output == MemoryWritePlan {
-        MemoryStore(plan: plan)
+        MemoryStore(mode: mode, plan: plan)
     }
 
-    public static func store(_ entry: MemoryEntry) -> MemoryStore<Just<MemoryWritePlan>> {
-        MemoryStore {
+    public static func store(
+        _ entry: MemoryEntry,
+        mode: MemoryStoreMode = .sync
+    ) -> MemoryStore<Just<MemoryWritePlan>> {
+        MemoryStore(mode: mode) {
             Just(value: MemoryWritePlan(entries: [entry]))
         }
     }
 
-    public static func store(_ entries: [MemoryEntry]) -> MemoryStore<Just<MemoryWritePlan>> {
-        MemoryStore {
+    public static func store(
+        _ entries: [MemoryEntry],
+        mode: MemoryStoreMode = .sync
+    ) -> MemoryStore<Just<MemoryWritePlan>> {
+        MemoryStore(mode: mode) {
             Just(value: MemoryWritePlan(entries: entries))
         }
     }

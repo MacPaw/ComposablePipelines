@@ -26,55 +26,41 @@ struct CustomerSupportPipeline: Pipeline {
             rules: [.pii],
             allowed: {
                 // Parallel enrichment — intent + sentiment will resolve independently
-                $intent.set {
-                    Model<String>()
-                        .systemPrompt("Classify customer intent: billing, technical, feedback, or general")
-                        .input { $message.get() }
-                }
+                Model<String>("Classify customer intent: billing, technical, feedback, or general")
+                    .input { $message }
+                    .assign(to: $intent)
 
-                $sentiment.set {
-                    Model<String>()
-                        .systemPrompt("Analyze customer sentiment in one word: positive, neutral, frustrated, angry")
-                        .input { $message.get() }
-                }
+                Model<String>("Analyze customer sentiment in one word: positive, neutral, frustrated, angry")
+                    .input { $message }
+                    .assign(to: $sentiment)
                 switch intent {
                 case "billing":
-                    $context.set {
-                        Model<String>()
-                            .systemPrompt("Look up relevant billing policies and recent account activity")
-                            .input { $message.get() }
-                    }
+                    Model<String>("Look up relevant billing policies and recent account activity")
+                        .input { $message }
+                        .assign(to: $context)
+                    // Prompt bakes bare `sentiment` (@State) → closure form captures that read.
                     $reply.set {
-                        Model<String>()
-                            .systemPrompt("Draft a billing support response. Be empathetic if sentiment is \(sentiment)")
-                            .input { $context.get() }
+                        Model<String>("Draft a billing support response. Be empathetic if sentiment is \(sentiment)")
+                            .input { $context }
                     }
 
                 case "technical":
-                    $context.set {
-                        Model<String>()
-                            .systemPrompt("Search knowledge base for relevant troubleshooting steps")
-                            .input { $message.get() }
-                    }
-                    $reply.set {
-                        Model<String>()
-                            .systemPrompt("Write step-by-step technical support instructions")
-                            .input { $context.get() }
-                    }
+                    Model<String>("Search knowledge base for relevant troubleshooting steps")
+                        .input { $message }
+                        .assign(to: $context)
+                    Model<String>("Write step-by-step technical support instructions")
+                        .input { $context }
+                        .assign(to: $reply)
 
                 case "feedback":
-                    $reply.set {
-                        Model<String>()
-                            .systemPrompt("Thank the customer for their feedback and acknowledge their points")
-                            .input { $message.get() }
-                    }
+                    Model<String>("Thank the customer for their feedback and acknowledge their points")
+                        .input { $message }
+                        .assign(to: $reply)
 
                 case "general":
-                    $reply.set {
-                        Model<String>()
-                            .systemPrompt("Provide a helpful general response")
-                            .input { $message.get() }
-                    }
+                    Model<String>("Provide a helpful general response")
+                        .input { $message }
+                        .assign(to: $reply)
                 default:
                     $reply.set("I'm not sure how to help with \(intent).")
                 }

@@ -15,6 +15,15 @@ enum PipelineGraphTestHelpers {
         prettyLines(graph, prefix: "").joined(separator: "\n")
     }
 
+    /// UUID-agnostic structural rendering: identical to ``prettyPrint(_:)`` but with every
+    /// UUID replaced by `<id>`, so two pipelines that differ only in their (randomly assigned)
+    /// slot / task ids compare equal. Use when comparing two separate fixture structs.
+    static func shape(of graph: PipelineGraph) -> String {
+        let rendered = prettyPrint(graph)
+        let uuid = #/[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}/#
+        return rendered.replacing(uuid, with: "<id>")
+    }
+
     private static func prettyLines(_ graph: PipelineGraph, prefix: String) -> [String] {
         switch graph {
         case .empty:
@@ -76,16 +85,26 @@ enum PipelineGraphTestHelpers {
             preconditionFailure("executionStateSet is formatted in prettyLines")
         case let .executionStateGet(id, valueTypeName, _, _):
             return "leaf executionStateGet(\(id.uuidString), \(valueTypeName))"
+        case let .executionStateFrozenSet(id, valueTypeName, _, _):
+            return "leaf executionStateFrozenSet(\(id.uuidString), \(valueTypeName))"
         case .clientAction:
             preconditionFailure("clientAction is formatted in prettyLines")
         case let .opaque(typeName):
             return "leaf opaque(\(typeName))"
+        case let .combine(parts):
+            return "leaf combine(\(parts.count))"
         case let .contextProvide(providerID, _):
             return "leaf contextProvide(provider: \(providerID.uuidString))"
         case let .memoryQuery(quality, _):
             return "leaf memoryQuery(quality: \(quality.rawValue))"
         case .memoryStore:
             return "leaf memoryStore"
+        case .router:
+            return "leaf router"
+        case .dagPlan:
+            return "leaf dagPlan"
+        case .relevanceRank:
+            return "leaf relevanceRank"
         }
     }
 

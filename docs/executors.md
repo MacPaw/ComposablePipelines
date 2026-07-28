@@ -97,7 +97,7 @@ let result = try await walker.run(graph: graph)
 
 ## Running with client tasks
 
-`ClientTask` steps don't go through the executor — the walker resolves them through a
+`Run` (client task) steps don't go through the executor — the walker resolves them through a
 `clientActionProvider`. The DSL captures each task's closure when you lower the pipeline; wire
 those captured actions into the run:
 

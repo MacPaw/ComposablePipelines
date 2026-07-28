@@ -24,9 +24,9 @@ struct DocumentSummaryPipeline: Pipeline {
     @State var summary = ""
 
     var body: some Pipeline {
-        $keyPoints.set { Model<String>().systemPrompt("Extract the 5 key points.").message(document) }
-        $draft.set    { Model<String>().systemPrompt("Summarize from these points.").input { $keyPoints.get() } }
-        Group { $summary.set { Summarize(text: $draft, maxTokens: 512) } }
+        Model<String>("Extract the 5 key points.").message(document).assign(to: $keyPoints)
+        Model<String>("Summarize from these points.").input { $keyPoints }.assign(to: $draft)
+        Group { Summarize(text: $draft, maxTokens: 512).assign(to: $summary) }
     }
 }
 ```
@@ -39,17 +39,23 @@ rewrite depends on all three and waits for them. (The full source also gates the
 `Guardrail`.)
 
 ```swift
-$draft.set { Model<String>().systemPrompt("Write a short article on the topic.").input { $topic.get() } }
+Model<String>("Write a short article on the topic.").input { $topic }.assign(to: $draft)
 
 // No data dependency between these three → they run concurrently.
-$grammarNotes.set { Model<String>().systemPrompt("Review grammar. Be concise.").input { $draft.get() } }
-$styleNotes.set   { Model<String>().systemPrompt("Review tone & style. Be concise.").input { $draft.get() } }
-$factNotes.set    { Model<String>().systemPrompt("Flag unsupported claims. Be concise.").input { $draft.get() } }
+Model<String>("Review grammar. Be concise.").input { $draft }.assign(to: $grammarNotes)
+Model<String>("Review tone & style. Be concise.").input { $draft }.assign(to: $styleNotes)
+Model<String>("Flag unsupported claims. Be concise.").input { $draft }.assign(to: $factNotes)
 
+// The prompt bakes bare `grammarNotes`/`styleNotes`/`factNotes` (@State) at lowering, so use the
+// closure `set { }` form — it captures those reads as dependencies; `.assign` (value form) can't.
 $finalDraft.set {
-    Model<String>()
-        .systemPrompt("Rewrite applying:\nGrammar: \(grammarNotes)\nStyle: \(styleNotes)\nFacts: \(factNotes)")
-        .input { $draft.get() }
+    Model<String> {
+        "Rewrite applying:"
+        "Grammar: \(grammarNotes)"
+        "Style: \(styleNotes)"
+        "Facts: \(factNotes)"
+    }
+    .input { $draft }
 }
 ```
 
@@ -68,14 +74,13 @@ struct BatchSummaryPipeline: Pipeline {
     @State var digest = ""
 
     var body: some Pipeline {
-        ForEach(in: documents) { document in                       // one step per element
-            $notes.set {
-                Model<String>()
-                    .systemPrompt("Summarize in one line, append to the notes:\n\(document)")
-                    .input { $notes.get() }                        // reads what the prior iteration committed
-            }
+        ForEach(documents) { document in                           // one step per element
+            // `document` is the loop element (a `let`), not @State — safe to assign.
+            Model<String>("Summarize in one line, append to the notes:\n\(document)")
+                .input { $notes }                                  // reads what the prior iteration committed
+                .assign(to: $notes)
         }
-        $digest.set { Model<String>().systemPrompt("Two-sentence digest of these notes.").input { $notes.get() } }
+        Model<String>("Two-sentence digest of these notes.").input { $notes }.assign(to: $digest)
     }
 }
 ```
@@ -87,22 +92,24 @@ Request models by capability, not name (`requirements:`); branch on the produced
 short-circuit with `Self.return` to skip the expensive path.
 
 ```swift
-$verdict.set {                                                     // cheap triage, quick local model
-    Model<String>()
-        .requirements(ModelSelectionRequirements(traits: [.quick, .localOnly]))
-        .systemPrompt("Triage: reply 'trivial' or 'needs-review'.")
-        .input { $diff.get() }
-}
+// cheap triage, quick local model
+Model<String>(
+    "Triage: reply 'trivial' or 'needs-review'.",
+    requirements: ModelSelectionRequirements(traits: [.quick, .localOnly])
+)
+.input { $diff }
+.assign(to: $verdict)
 if verdict == "trivial" {                                          // reactive branch on the result
     Self.return("LGTM — trivial change.")                          // skip the expensive model
 }
-$review.set {                                                      // escalate to a reasoning model
-    Model<String>()
-        .requirements(ModelSelectionRequirements(traits: [.reasoning]))
-        .systemPrompt("Thorough review; list concerns.")
-        .input { $diff.get() }
-}
-$review.get()
+// escalate to a reasoning model
+Model<String>(
+    "Thorough review; list concerns.",
+    requirements: ModelSelectionRequirements(traits: [.reasoning])
+)
+.input { $diff }
+.assign(to: $review)
+$review
 ```
 
 ### [`ContentModerationPipeline`](../Examples/ContentModerationPipeline.swift)
@@ -110,11 +117,11 @@ A `Guardrail` gates the input; `if`/`else` on the classified severity picks the 
 
 ```swift
 Guardrail(input, rules: [.politics, .pii], allowed: {
-    $severity.set { Model<String>().systemPrompt("Classify severity…").input { $input.get() } }
+    Model<String>("Classify severity…").input { $input }.assign(to: $severity)
     if severity == "safe" {
         $explanation.set("Content is safe. No action needed.")
     } else {
-        $explanation.set { Model<String>().systemPrompt("Explain the violation…").input { $input.get() } }
+        Model<String>("Explain the violation…").input { $input }.assign(to: $explanation)
     }
 }, blocked: {
     Just(value: "I can't help with that — it conflicts with the safety policy.")
@@ -127,13 +134,13 @@ Guardrail(input, rules: [.politics, .pii], allowed: {
 Classify intent, then `switch` to specialized handling per category.
 
 ```swift
-$intent.set { Model<String>().systemPrompt("Classify: billing, technical, feedback, general").input { $message.get() } }
+Model<String>("Classify: billing, technical, feedback, general").input { $message }.assign(to: $intent)
 switch intent {
-case "billing":   $reply.set { Model<String>().systemPrompt("Draft a billing response.").input { $message.get() } }
-case "technical": $reply.set { Model<String>().systemPrompt("Write troubleshooting steps.").input { $message.get() } }
-default:          $reply.set { Model<String>().systemPrompt("Provide a helpful response.").input { $message.get() } }
+case "billing":   Model<String>("Draft a billing response.").input { $message }.assign(to: $reply)
+case "technical": Model<String>("Write troubleshooting steps.").input { $message }.assign(to: $reply)
+default:          Model<String>("Provide a helpful response.").input { $message }.assign(to: $reply)
 }
-$reply.get()
+$reply
 ```
 
 ## Retrieval-augmented generation
@@ -152,12 +159,11 @@ struct KnowledgeBaseQAPipeline: Pipeline {
     @State var answer = ""
 
     var body: some Pipeline {
-        $context.set { From(knowledgeBase, query: $question) }             // retrieve
-        $answer.set {                                                      // answer from context only
-            Model<String>()
-                .systemPrompt("Answer using only the provided context; else say you don't know.")
-                .input { $context.get() }
-        }
+        From(knowledgeBase, query: $question).assign(to: $context)         // retrieve
+        // answer from context only
+        Model<String>("Answer using only the provided context; else say you don't know.")
+            .input { $context }
+            .assign(to: $answer)
     }
 }
 ```
@@ -165,21 +171,21 @@ struct KnowledgeBaseQAPipeline: Pipeline {
 ## Loops, retries, and agents
 
 ### [`SelfHealingExtractionPipeline`](../Examples/SelfHealingExtractionPipeline.swift)
-A `While` retry loop over ordinary `@State`: ask for JSON, validate in plain Swift via `ClientTask`,
+A `While` retry loop over ordinary `@State`: ask for JSON, validate in plain Swift via `Run`,
 and fold the previous error back into the next prompt until it's valid or attempts run out.
 
 ```swift
-While(condition: { !valid && attempts < maxAttempts }) {
+While(!valid && attempts < maxAttempts) {
+    // Prompt folds bare `lastError` (@State) into each retry → closure `set { }` form required.
     $candidate.set {
-        Model<String>()
-            .systemPrompt("Extract {\"name\",\"age\"} as JSON. \(lastError.isEmpty ? "" : "Previous error: \(lastError)")")
+        Model<String>("Extract {\"name\",\"age\"} as JSON. \(lastError.isEmpty ? "" : "Previous error: \(lastError)")")
             .message(text)
     }
-    $valid.set     { ClientTask(input: $candidate) { Self.isValidPersonJSON($0) } }
-    $lastError.set { ClientTask(input: $candidate) { Self.isValidPersonJSON($0) ? "" : "expected name and age" } }
-    $attempts.set  { ClientTask(input: $attempts) { $0 + 1 } }
+    $candidate.map { Self.isValidPersonJSON($0) }.assign(to: $valid)
+    $candidate.map { Self.isValidPersonJSON($0) ? "" : "expected name and age" }.assign(to: $lastError)
+    $attempts.map { $0 + 1 }.assign(to: $attempts)
 }
-$candidate.get()
+$candidate
 ```
 
 ### [`ResearchAssistantPipeline`](../Examples/ResearchAssistantPipeline.swift)
@@ -187,28 +193,26 @@ A tool-calling agent loop: each turn the model calls tools or answers; tool resu
 the transcript until it returns a final reply.
 
 ```swift
-While(condition: { reply.isEmpty && turns < maxTurns }) {
-    $lastTurn.set {
-        Model<ModelTurn>().tools(tools.map(\.descriptor))
-            .systemPrompt("Call a tool when you need information; otherwise answer.")
-            .input { $transcript.get() }
-    }
-    $transcript.set {                                                  // dispatch tool calls, append results
-        ClientTask(input: $lastTurn) { turn in
-            guard let calls = turn.toolCalls, !calls.isEmpty else { return transcript }
-            var updated = transcript
-            for call in calls {
-                let out = try await ToolRegistry(tools).executeJSON(
-                    toolName: call.name, inputJSON: Data(call.arguments.utf8))
-                updated += "\n[\(call.name)] " + String(decoding: out, as: UTF8.self)
-            }
-            return updated
+While(reply.isEmpty && turns < maxTurns) {
+    Model<ModelTurn>("Call a tool when you need information; otherwise answer.")
+        .tools(tools.map(\.descriptor))
+        .input { $transcript }
+        .assign(to: $lastTurn)
+    Run($lastTurn) { turn in                                           // dispatch tool calls, append results
+        guard let calls = turn.toolCalls, !calls.isEmpty else { return transcript }
+        var updated = transcript
+        for call in calls {
+            let out = try await ToolRegistry(tools).executeJSON(
+                toolName: call.name, inputJSON: Data(call.arguments.utf8))
+            updated += "\n[\(call.name)] " + String(decoding: out, as: UTF8.self)
         }
+        return updated
     }
-    $reply.set { ClientTask(input: $lastTurn) { $0.reply ?? "" } }
-    $turns.set { ClientTask(input: $turns) { $0 + 1 } }
+    .assign(to: $transcript)
+    $lastTurn.map { $0.reply ?? "" }.assign(to: $reply)
+    $turns.map { $0 + 1 }.assign(to: $turns)
 }
-$reply.get()
+$reply
 ```
 
 ### [`CodingAgentPipeline`](../CodingAgent/CodingAgentPipeline.swift)
@@ -218,22 +222,22 @@ stall recovery, and a swappable agent behind the `ChatAgent` protocol. It lives 
 `CodingAgent/` target and powers the `cp-agent` executable.
 
 ```swift
-While(condition: { reply.isEmpty && turns < maxTurns }) {
+While(reply.isEmpty && turns < maxTurns) {
     // Near the context window? Summarize the older transcript instead of dropping it; else take a turn.
     if compaction && transcript.count > compactionTrigger {
         CompactTranscript(summary: $compactionSummary, transcript: $transcript, /* head/middle/tail */)
     } else {
-        $lastTurn.set {
-            Model<ModelTurn>().tools(tools.map(\.descriptor))
-                .systemPrompt(systemPrompt)
-                .input { $transcript.get() }                  // no maxTokens → server default
-        }
-        $transcript.set { ClientTask(input: $lastTurn) { turn in /* run tool calls, append results */ } }
-        $reply.set { ClientTask(input: $lastTurn) { $0.toolCalls?.isEmpty == false ? "" : ($0.reply ?? "") } }
-        $turns.set { ClientTask(input: $turns) { $0 + 1 } }
+        // `systemPrompt` is a computed property over `let`s (no @State read), so `.assign` is safe.
+        Model<ModelTurn>(systemPrompt)
+            .tools(tools.map(\.descriptor))
+            .input { $transcript }                            // no maxTokens → server default
+            .assign(to: $lastTurn)
+        Run($lastTurn) { turn in /* run tool calls, append results */ }.assign(to: $transcript)
+        $lastTurn.map { $0.toolCalls?.isEmpty == false ? "" : ($0.reply ?? "") }.assign(to: $reply)
+        $turns.map { $0 + 1 }.assign(to: $turns)
     }
 }
-$reply.get()
+$reply
 ```
 
 See the [README worked example](../README.md#worked-example-a-coding-agent-as-a-pipeline) for the

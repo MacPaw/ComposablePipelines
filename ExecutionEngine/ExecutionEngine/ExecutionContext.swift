@@ -75,6 +75,17 @@ actor ExecutionContext {
         pendingSkipCountForNextWalk
     }
 
+    /// Ordinals consumed during the walk that scheduled the next graph.
+    /// Used by ``PipelineWalker`` to compute a key-aligned skip count.
+    func consumedOrdinalsAtSchedule() -> Int {
+        pendingSkipCountForNextWalk
+    }
+
+    /// Replaces the pending skip count with a key-aligned value computed by the walker.
+    func overridePendingSkipCount(_ count: Int) {
+        pendingSkipCountForNextWalk = count
+    }
+
     /// Number of surface (top-level) tasks that ran in the current walk iteration. Zero means
     /// the entire pass was prefix-skipped — the engine keeps the prior pass's final value.
     func surfaceTaskExecuteCount() -> Int {
@@ -434,6 +445,22 @@ actor ExecutionContext {
             throw ExecutionError.missingMemoryProvider
         }
         try await memoryProvider.add(entry)
+    }
+
+    func hasMemoryProvider() -> Bool {
+        memoryProvider != nil
+    }
+
+    /// Returns the memory provider so async callers can hold it directly, avoiding
+    /// actor re-entry from a detached background task.
+    func memoryProviderForAsync() -> (any MemoryProvider)? {
+        memoryProvider
+    }
+
+    func requireMemoryProviderForStore() throws {
+        guard memoryProvider != nil else {
+            throw ExecutionError.missingMemoryProvider
+        }
     }
 
     // MARK: - Trace

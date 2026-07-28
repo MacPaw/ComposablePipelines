@@ -54,4 +54,6 @@ public struct ModelSelectionTraits: OptionSet, Codable, Equatable, Sendable, Has
     public static let entityExtraction     = Self(rawValue: 1 << 14)
     /// Normalize extracted entities into structured memory facts.
     public static let memoryNormalization  = Self(rawValue: 1 << 15)
+    /// Content-safety guardrail classification.
+    public static let guardrailClassification = Self(rawValue: 1 << 16)
 }

@@ -20,8 +20,12 @@ extension PipelineExecutionGraph.Operation {
         case .stateSet:     return "stateSet"
         case .model:        return "model"
         case .modelInput:   return "model"
+        case .router:       return "router"
+        case .dagPlan:      return "dagPlan"
+        case .relevanceRank: return "relevanceRank"
         case .summarize:    return "summarize"
         case .clientAction: return "clientAction"
+        case .combine:      return "combine"
         case .contextProvide: return "contextProvide"
         case .memoryQuery: return "memoryQuery"
         case .memoryStore: return "memoryStore"
@@ -40,7 +44,7 @@ extension PipelineExecutionGraph.Operation {
         case let .stateGet(slotID, _, _, _): return slotID
         case let .stateSet(slotID, _, _, _, _): return slotID
         case let .summarize(slotID, _, _):   return slotID
-        case .constant, .model, .modelInput, .clientAction, .contextProvide, .memoryQuery, .memoryStore: return nil
+        case .constant, .model, .modelInput, .router, .dagPlan, .relevanceRank, .clientAction, .combine, .contextProvide, .memoryQuery, .memoryStore: return nil
         }
     }
 }
@@ -50,6 +54,12 @@ extension PipelineExecutionGraph.Operation {
 extension PipelineExecutionGraph.Operation {
     var prettyLabel: String {
         switch self {
+        case .router:
+            return "router"
+        case let .dagPlan(_, tools, hints):
+            return "dagPlan(tools: \(tools.count), hints: \(hints.count))"
+        case let .relevanceRank(_, tools, threshold, topK):
+            return "relevanceRank(tools: \(tools.count), threshold: \(threshold), topK: \(topK))"
         case let .model(config, _):
             return "model → \(config.outputTypeName)"
         case let .modelInput(config, _, _):
@@ -64,12 +74,14 @@ extension PipelineExecutionGraph.Operation {
             return "[\(slotID.shortID)].set"
         case let .clientAction(id, _):
             return "clientAction(\(id.shortID))"
+        case let .combine(inputs):
+            return "combine(\(inputs.count))"
         case let .contextProvide(providerID, _):
             return "contextProvide(\(providerID.shortID))"
         case let .memoryQuery(quality, _):
             return "memory(\(quality.rawValue))"
-        case .memoryStore:
-            return "memory.store"
+        case let .memoryStore(_, mode):
+            return mode == .sync ? "memory.store" : "memory.store.async"
         case let .constant(type, json):
             let val = json.count > 30 ? String(json.prefix(27)) + "..." : json
             return "\(type)(\(val))"

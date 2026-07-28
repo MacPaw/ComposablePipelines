@@ -29,23 +29,19 @@ struct BatchSummaryPipeline: Pipeline {
 
     var body: some Pipeline {
         // MAP: one summary step per document, threading `notes` through each iteration.
-        ForEach(in: documents) { document in
-            $notes.set {
-                Model<String>()
-                    .systemPrompt("""
-                        Summarize the document in one line and append it to the running notes. \
-                        Document:
-                        \(document)
-                        """)
-                    .input { $notes.get() }
-            }
+        ForEach(documents) { document in
+            Model<String>("""
+                Summarize the document in one line and append it to the running notes. \
+                Document:
+                \(document)
+                """)
+                .input { $notes }
+                .assign(to: $notes)
         }
 
         // REDUCE: collapse the accumulated notes into a short digest.
-        $digest.set {
-            Model<String>()
-                .systemPrompt("Write a two-sentence digest of these notes.")
-                .input { $notes.get() }
-        }
+        Model<String>("Write a two-sentence digest of these notes.")
+            .input { $notes }
+            .assign(to: $digest)
     }
 }

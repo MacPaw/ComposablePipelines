@@ -23,8 +23,8 @@ import PipelineCompiler
 ///   slot values back into a persistent DSL `ExecutionContext`. Required for `While` loops and
 ///   `if`/`switch` that branch on model output.
 ///
-/// `ClientTask` closures are captured at lowering and run as written; only `Model`/`Guardrail`
-/// steps consult the scripted executor.
+/// `Run` (client task) closures are captured at lowering and run as written; only
+/// `Model`/`Guardrail` steps consult the scripted executor.
 enum PipelineRun {
 
     typealias Trace = (result: ExecutionValue, events: [ExecutionEvent])

@@ -27,12 +27,12 @@ struct CodeReviewPipeline: Pipeline {
 
     var body: some Pipeline {
         // Cheap triage on a quick on-device model.
-        $verdict.set {
-            Model<String>()
-                .requirements(ModelSelectionRequirements(traits: [.quick, .localOnly]))
-                .systemPrompt("Triage this diff. Reply with exactly 'trivial' or 'needs-review'.")
-                .input { $diff.get() }
-        }
+        Model<String>(
+            "Triage this diff. Reply with exactly 'trivial' or 'needs-review'.",
+            requirements: ModelSelectionRequirements(traits: [.quick, .localOnly])
+        )
+        .input { $diff }
+        .assign(to: $verdict)
 
         // Trivial diffs never reach the expensive model.
         if verdict == "trivial" {
@@ -40,12 +40,12 @@ struct CodeReviewPipeline: Pipeline {
         }
 
         // Escalate: thorough review on a reasoning model.
-        $review.set {
-            Model<String>()
-                .requirements(ModelSelectionRequirements(traits: [.reasoning]))
-                .systemPrompt("Perform a thorough code review of this diff and list concerns.")
-                .input { $diff.get() }
-        }
-        $review.get()
+        Model<String>(
+            "Perform a thorough code review of this diff and list concerns.",
+            requirements: ModelSelectionRequirements(traits: [.reasoning])
+        )
+        .input { $diff }
+        .assign(to: $review)
+        $review
     }
 }

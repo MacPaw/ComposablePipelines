@@ -23,18 +23,15 @@ struct ContentModerationPipeline: Pipeline {
             input,
             rules: [.politics, .pii],
             allowed: {
-                $severity.set {
-                    Model<String>().systemPrompt("Classify content severity...").input { $input.get() }
-                }
+                Model<String>("Classify content severity...").input { $input }.assign(to: $severity)
 
                 if severity == "safe" {
                     $explanation.set("Content is safe. No action needed.")
                 } else {
-                    $category.set {
-                        Model<String>().systemPrompt("Categorize the policy violation...").input { $input.get() }
-                    }
+                    Model<String>("Categorize the policy violation...").input { $input }.assign(to: $category)
+                    // Prompt bakes bare `severity` (@State) → closure form captures that read.
                     $explanation.set {
-                        Model<String>().systemPrompt("Write a brief moderation ...: \(severity)").input { $input.get() }
+                        Model<String>("Write a brief moderation ...: \(severity)").input { $input }
                     }
                 }
             },

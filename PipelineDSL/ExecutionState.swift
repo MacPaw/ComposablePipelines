@@ -166,10 +166,14 @@ public struct Binding<Value: Hashable & Sendable & Codable>: Hashable, Sendable 
         let writeKind: StateWriteKind
 
         public var pipelineGraph: PipelineGraph {
-            // The set's own leaf — either the write, or a frozen read-only get (see `freezesToGet`).
+            // The set's own leaf — either the write, or a frozen placeholder (see `freezesToGet`).
             let leaf: PipelineGraph
             if freezesToGet {
-                leaf = .leaf(.executionStateGet(
+                // Use `executionStateFrozenSet` instead of `executionStateGet` so that
+                // `SlotAccess` still records a *write* for this slot. This preserves the
+                // RAW ordering edge to any subsequent `$binding.get()` — preventing the
+                // compiler from pulling the explicit get into a parallel with this node.
+                leaf = .leaf(.executionStateFrozenSet(
                     id: state.id,
                     valueTypeName: String(describing: Value.self),
                     debugLabel: state.debugLabel,
@@ -214,6 +218,17 @@ public struct Binding<Value: Hashable & Sendable & Codable>: Hashable, Sendable 
                   let context = ExecutionContext.current,
                   ExecutionContext.executionEpoch > 0 else { return false }
             let epoch = ExecutionContext.executionEpoch
+            // Freeze if the slot has been committed at any epoch ≤ the current cursor epoch.
+            // `<= epoch` (not `== epoch`) covers multi-slot commit batches: when N slots commit
+            // in one flush, their epochs are sequential (e.g. 1, 2, 3) and the cursor epoch is
+            // the last one (3). A write at epoch 1 must still freeze so it doesn't re-execute and
+            // trigger another flush, causing an infinite re-evaluation loop.
+            //
+            // Known limitation: if an upstream slot changes *after* this slot was committed (e.g.
+            // a conditional branch switches to a branch that also writes this slot), the old
+            // committed value from the prior branch freezes here instead of re-running. A precise
+            // fix requires tracking which slots each write depended on — deferred until the engine
+            // stabilises and dependency tracking is in scope.
             return context.$slotHistory.read { dict in
                 dict[state.id]?.contains(where: { $0.epoch <= epoch }) == true
             }

@@ -54,6 +54,21 @@ public struct While<Body: Pipeline>: LeafPipeline {
         self.iterationBodyBuilder = body
     }
 
+    /// Autoclosure spelling — the condition expression is re-evaluated on every emission,
+    /// exactly like the closure form:
+    ///
+    /// ```swift
+    /// While(!done) {
+    ///     $done.set { StepThatSetsDone() }
+    /// }
+    /// ```
+    public init(
+        _ condition: @autoclosure @Sendable @escaping () -> Bool,
+        @PipelineBuilder body: @Sendable @escaping () -> Body
+    ) {
+        self.init(condition: condition, body: body)
+    }
+
     public var pipelineGraph: PipelineGraph {
         let ctx = GraphEmissionContext.current
         let snapshot = ctx?.readCount ?? 0

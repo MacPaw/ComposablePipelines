@@ -40,7 +40,7 @@ final class PipelineCompilerTests: XCTestCase {
             outputTypeName: "String",
             traits: [],
             streamingReplySlotID: nil,
-            contextItemsSlotID: readingSlot
+            contextItemsSlotIDs: readingSlot.map { [$0] } ?? []
         )
         return .leaf(.model(config: config, arguments: ["systemPrompt": .systemPrompt(instructions)]))
     }
@@ -72,7 +72,7 @@ final class PipelineCompilerTests: XCTestCase {
             outputTypeName: "String",
             traits: traits,
             streamingReplySlotID: nil,
-            contextItemsSlotID: nil
+            contextItemsSlotIDs: []
         )
         let ast: PipelineGraph = .leaf(.model(config: config, arguments: [:]))
 
@@ -124,7 +124,7 @@ final class PipelineCompilerTests: XCTestCase {
             outputTypeName: "String",
             traits: [.quick],
             streamingReplySlotID: nil,
-            contextItemsSlotID: nil
+            contextItemsSlotIDs: []
         )
         let graph = PipelineExecutionGraph.task(.init(operation: .model(
             config: config,
@@ -444,7 +444,7 @@ final class PipelineCompilerTests: XCTestCase {
                 outputTypeName: "String",
                     traits: [],
                 streamingReplySlotID: nil,
-                contextItemsSlotID: slots.first
+                contextItemsSlotIDs: slots.first.map { [$0] } ?? []
             ),
             arguments: ["systemPrompt": .systemPrompt("merge")]
         )))

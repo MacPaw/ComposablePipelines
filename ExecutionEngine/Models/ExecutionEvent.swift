@@ -7,6 +7,7 @@
 //
 
 import Foundation
+import PipelineAST
 
 // MARK: - ExecutionEvent
 
@@ -33,6 +34,10 @@ public enum ExecutionEvent: Sendable {
     case reexecutionStarted(depth: Int)
     /// Resource loading progress for the current pipeline run iteration.
     case resourceProgressUpdated(ExecutionProgressUpdate)
+    /// A memory store operation was launched. Async stores emit this before returning.
+    case memoryStoreStarted(entryCount: Int, mode: MemoryStoreMode)
+    /// A memory store operation finished after it was launched.
+    case memoryStoreCompleted(entryCount: Int, mode: MemoryStoreMode, errorDescription: String?)
     /// The top-level `run(...)` call completed successfully.
     case executionCompleted
     /// Incremental model output text produced during a `.model` step (token streaming).
@@ -54,7 +59,7 @@ public struct StepInfo: Sendable {
     /// Use for category-level matching (e.g., trace assertions).
     public let operationLabel: String
     /// Human-readable label including slot binding / model output type — `"$severity.set"`,
-    /// `"guardrail([.politics, .pii])"`, `"model → String"`.
+    /// `"guardrail([.geopolitics, .illegal])"`, `"model → String"`.
     public let prettyLabel: String
     /// Slot UUID for `stateGet` / `stateSet` operations; `nil` for everything else.
     /// Lets observers correlate a step with the slot it touched without re-walking
