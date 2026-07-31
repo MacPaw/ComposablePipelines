@@ -92,14 +92,14 @@ extension PipelineExecutionGraph {
             return "summarize:\(slotID)"
         case .clientAction(let taskID, _):
             return "clientAction:\(taskID)"
+        case .combine(let inputs):
+            return "combine:\(inputs.count)"
         case .contextProvide(let providerID, _):
             return "contextProvide:\(providerID)"
         case .memoryQuery:
             return "memoryQuery"
         case .memoryStore(_, let mode):
             return "memoryStore:\(mode.rawValue)"
-        case .combine:
-            return "combine"
         case .constant(let valueTypeName, let json):
             return "const:\(valueTypeName):\(json)"
         }

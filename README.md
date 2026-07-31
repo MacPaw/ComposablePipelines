@@ -32,17 +32,13 @@ struct Summary: Pipeline {
     @State var summary = ""
 
     var body: some Pipeline {
-        $keyPoints.set {                                   // step 1 → slot
-            Model<String>()
-                .systemPrompt("Extract the 5 key points.")
-                .message(document)
-        }
-        $summary.set {                                     // step 2 reads step 1
-            Model<String>()
-                .systemPrompt("Write a concise summary from these points.")
-                .input { $keyPoints.get() }
-        }
-        $summary.get()                                     // pipeline output
+        Model<String>("Extract the 5 key points.")         // step 1 → slot
+            .message(document)
+            .assign(to: $keyPoints)
+        Model<String>("Write a concise summary from these points.")   // step 2 reads step 1
+            .input { $keyPoints }
+            .assign(to: $summary)
+        $summary                                           // pipeline output
     }
 }
 ```
@@ -62,15 +58,13 @@ struct Triage: Pipeline {
     @State var reply = ""
 
     var body: some Pipeline {
-        $severity.set {                                    // classify
-            Model<String>().systemPrompt("Reply 'high' or 'low'.").message(ticket)
-        }
+        Model<String>("Reply 'high' or 'low'.").message(ticket).assign(to: $severity)   // classify
         if severity == "high" {                            // native `if`, re-evaluated on the result
-            $reply.set { Model<String>().systemPrompt("Draft an urgent reply.").message(ticket) }
+            Model<String>("Draft an urgent reply.").message(ticket).assign(to: $reply)
         } else {
             $reply.set("Queued for standard handling.")    // a plain value is a step, too
         }
-        $reply.get()                                       // pipeline output
+        $reply                                             // pipeline output
     }
 }
 ```
