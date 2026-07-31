@@ -98,8 +98,6 @@ extension PipelineExecutionGraph {
             return "memoryQuery"
         case .memoryStore(_, let mode):
             return "memoryStore:\(mode.rawValue)"
-        case .combine:
-            return "combine"
         case .constant(let valueTypeName, let json):
             return "const:\(valueTypeName):\(json)"
         }
