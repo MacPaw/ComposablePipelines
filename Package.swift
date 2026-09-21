@@ -4,7 +4,7 @@
 // a SwiftUI-like DSL, a Codable AST, a compiler, and an observable walker. Execution
 // plugs in through the `Executor` seam.
 //
-// Copyright © 2026 MacPaw Inc. Licensed under the Apache License, Version 2.0 (see LICENSE).
+// Copyright © 2026 MacPaw Way Ltd. Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import CompilerPluginSupport
 import PackageDescription

@@ -322,7 +322,7 @@ struct CodingAgentPipeline: Pipeline {
 
 ## License
 
-Apache License 2.0 — © MacPaw Inc. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Apache License 2.0 — © MacPaw Way Ltd. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 ## A note on this repository
 
