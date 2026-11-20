@@ -2,7 +2,7 @@
 //  PipelineExecutionGraph+SurfaceTaskKeys.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -64,6 +64,9 @@ extension PipelineExecutionGraph {
             return branches.flatMap { $0.surfaceOperations() }
         case .loopScope:
             return []
+        case .branch, .whileLoop:
+            // Slot-driven, evaluated in-graph — outside the surface ordinal space.
+            return []
         }
     }
 
@@ -78,12 +81,17 @@ extension PipelineExecutionGraph {
             return "slot:\(slotID)"
         case .stateSet(let slotID, _, _, _, _):
             return "slot:\(slotID)"
-        case .router:
-            return "router"
+        case let .classify(_, task, _):
+            // The kind is in the key so a re-lowering that swaps a span task for a sequence task never
+            // aligns with it. The payload is not, matching `model:` (output type, not prompt): a step
+            // whose labels or pin change between passes still aligns with its earlier self.
+            return "classify:\(task.kind.rawValue)"
         case .dagPlan:
             return "dagPlan"
         case .relevanceRank:
             return "relevanceRank"
+        case .combine:
+            return "combine"
         case .model(let config, _):
             return "model:\(config.outputTypeName):\(config.traits.rawValue)"
         case .modelInput(let config, _, _):
@@ -92,14 +100,14 @@ extension PipelineExecutionGraph {
             return "summarize:\(slotID)"
         case .clientAction(let taskID, _):
             return "clientAction:\(taskID)"
-        case .combine(let inputs):
-            return "combine:\(inputs.count)"
         case .contextProvide(let providerID, _):
             return "contextProvide:\(providerID)"
         case .memoryQuery:
             return "memoryQuery"
         case .memoryStore(_, let mode):
             return "memoryStore:\(mode.rawValue)"
+        case .delegate(_, let tasksSlotID, _, _, _, _):
+            return "delegate:\(tasksSlotID)"
         case .constant(let valueTypeName, let json):
             return "const:\(valueTypeName):\(json)"
         }

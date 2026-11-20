@@ -2,7 +2,7 @@
 //  PipelineGraph.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -27,6 +27,15 @@ public indirect enum PipelineGraph: Codable, Sendable {
     /// (so the body is not torn apart by a mid-body re-execution), and its tasks are never
     /// prefix-skipped — each re-lowering pass runs the body afresh until the loop condition is false.
     case loop(PipelineGraph)
+    /// **Slot-driven** conditional, evaluated **in-graph** by the walker (no re-lowering): read the
+    /// `Bool` in `conditionSlotID` and walk `then` when true, else `otherwise`. Unlike the DSL's
+    /// closure-driven `if` (which is resolved by re-emitting the graph), this branch is self-contained
+    /// in the graph, so it works without a `graphProvider` — e.g. inside a delegate's static walk.
+    case branch(conditionSlotID: UUID, then: PipelineGraph, otherwise: PipelineGraph)
+    /// **Slot-driven** while loop, iterated **in-graph** by the walker (no re-lowering): while the
+    /// `Bool` in `conditionSlotID` is true, walk `body` (which must update that slot), re-reading the
+    /// condition each iteration. Self-contained in the graph, so it works without a `graphProvider`.
+    case whileLoop(conditionSlotID: UUID, body: PipelineGraph)
 }
 
 extension PipelineGraph: Equatable {
@@ -44,6 +53,10 @@ extension PipelineGraph: Equatable {
             return seqA == seqB && gateA == gateB && a == b
         case let (.loop(a), .loop(b)):
             return a == b
+        case let (.branch(condA, thenA, elseA), .branch(condB, thenB, elseB)):
+            return condA == condB && thenA == thenB && elseA == elseB
+        case let (.whileLoop(condA, bodyA), .whileLoop(condB, bodyB)):
+            return condA == condB && bodyA == bodyB
         default:
             return false
         }
@@ -51,12 +64,15 @@ extension PipelineGraph: Equatable {
 }
 
 public enum PipelineGraphLeaf: Codable, Equatable, Sendable {
-    /// Two-layer workflow router. The runner decides how to satisfy this via resources.
-    case router(query: PipelineGraph, tools: [ToolDescriptor])
+    /// Encoder classification of `text`. `task` selects the kind and carries the caller's inputs;
+    /// `spec` optionally pins a checkpoint (`nil` selects any resource of the kind). Produces
+    /// ``LabelScores`` for the sequence tasks and ``LabeledSpans`` for the token tasks, each carrying a
+    /// ``ClassificationStatus``. The runner decides how to satisfy this via resources.
+    case classify(text: PipelineGraph, task: ClassificationTask, spec: ModelSpecDescriptor?)
     /// Task-planning DAG model. The runner decides how to satisfy this via resources.
     case dagPlan(query: PipelineGraph, tools: [ToolDescriptor], hints: [String])
-    /// Relevance ranker: scores `tools` by relevance to `query` and returns those above `threshold`.
-    case relevanceRank(query: PipelineGraph, tools: [ToolDescriptor], threshold: Float, topK: Int)
+    /// Relevance ranker: orders `tools` by embedding proximity to `query` and returns the closest `topK`.
+    case relevanceRank(query: PipelineGraph, tools: [ToolDescriptor], topK: Int)
     /// LLM-style step: static ``ModelConfig`` (output type, selection requirements, slot references) plus pre-built ``ModelArguments``.
     case model(config: ModelConfig, arguments: ModelArguments)
     /// Model step whose message is produced by a nested pipeline at execution time.
@@ -113,6 +129,25 @@ public enum PipelineGraphLeaf: Codable, Equatable, Sendable {
     /// `mode` is optional for wire-format backward compat: old payloads without the key decode as
     /// `nil`, which the compiler and walker treat as `.sync`.
     case memoryStore(plan: PipelineGraph, mode: MemoryStoreMode?)
+    /// Delegate-of-subagents fan-out executed **agent-side**. Reads `[String]` tasks from the slot
+    /// `tasksSlotID`, then runs `child` once per task — each in its own **isolated** execution scope,
+    /// with the task value seeded into `taskInputSlotID` — bounded by a ``SpawnBudget`` built from
+    /// `budgetTotal` / `leafReserve`. The distilled child results are gathered, in task order, into a
+    /// JSON array (the leaf's output).
+    ///
+    /// `child` is either an ``DelegateChild/embedded(_:)`` sub-graph (lowered once, like `classify` but run
+    /// in a fresh scope per task so subagents cannot observe or corrupt one another) or
+    /// ``DelegateChild/selfRecursion`` (each subagent re-runs the enclosing root graph — a delegate of the
+    /// agent itself). Either way, all subagents resolve model steps through the *same* executor (one
+    /// shared model instance).
+    case delegate(
+        child: DelegateChild<PipelineGraph>,
+        tasksSlotID: UUID,
+        taskInputSlotID: UUID,
+        budgetTotal: Int,
+        leafReserve: Int,
+        inherit: DelegateInheritance
+    )
     case opaque(typeName: String)
 }
 

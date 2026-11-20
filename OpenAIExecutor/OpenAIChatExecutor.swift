@@ -2,7 +2,7 @@
 //  OpenAIChatExecutor.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -127,7 +127,7 @@ public struct OpenAIChatExecutor: Executor {
         let user: String
         if case .string(let s)? = arguments.message { user = s } else { user = "" }
         let (content, toolCalls) = try await chat(
-            system: system, user: user,
+            system: system, user: user, history: arguments.priorTurns,
             tools: arguments.tools,
             temperature: arguments.temperature,
             maxTokens: arguments.maxTokens)
@@ -183,9 +183,84 @@ public struct OpenAIChatExecutor: Executor {
         return (firstInt(contextKeys), firstInt(outputKeys))
     }
 
+    /// System prompt, then the conversation, then anything this turn adds.
+    ///
+    /// The trailing `user` message is omitted when empty: with a history present it is usually
+    /// nothing, and an empty trailing turn changes what the model is answering.
+    ///
+    /// - Author: Claude
+    private static func messages(system: String, user: String,
+                                 history: [ConversationTurn]) -> [RequestMessage] {
+        var out: [RequestMessage] = []
+        if !system.isEmpty { out.append(RequestMessage(role: "system", content: system)) }
+        for turn in history {
+            out.append(RequestMessage(
+                role: turn.role,
+                content: turn.content,
+                toolCalls: turn.toolCalls.map { $0.map(OutgoingToolCall.init) },
+                toolCallID: turn.toolCallID))
+        }
+        if !user.isEmpty { out.append(RequestMessage(role: "user", content: user)) }
+        return out
+    }
+
     // MARK: - Wire types (request)
 
-    private struct RequestMessage: Encodable { let role: String; let content: String }
+    /// One outgoing message.
+    ///
+    /// `content` is omitted rather than sent empty on an assistant turn that only asked for
+    /// tools: some servers reject `content: ""` alongside `tool_calls`, and an empty string is
+    /// not the same claim as "this turn said nothing".
+    ///
+    /// - Author: Claude
+    private struct RequestMessage: Encodable {
+        let role: String
+        let content: String?
+        var toolCalls: [OutgoingToolCall]?
+        var toolCallID: String?
+
+        init(role: String, content: String?,
+             toolCalls: [OutgoingToolCall]? = nil, toolCallID: String? = nil) {
+            self.role = role
+            self.content = content
+            self.toolCalls = toolCalls
+            self.toolCallID = toolCallID
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case role, content
+            case toolCalls = "tool_calls"
+            case toolCallID = "tool_call_id"
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(role, forKey: .role)
+            if let content, !(content.isEmpty && toolCalls?.isEmpty == false) {
+                try c.encode(content, forKey: .content)
+            }
+            if let toolCalls, !toolCalls.isEmpty { try c.encode(toolCalls, forKey: .toolCalls) }
+            if let toolCallID { try c.encode(toolCallID, forKey: .toolCallID) }
+        }
+    }
+
+    /// An assistant turn's tool call, in the shape the API expects it back.
+    ///
+    /// Named apart from the response-side `ToolCallWire`: they encode the same concept in
+    /// opposite directions and one is Encodable while the other is Decodable.
+    ///
+    /// - Author: Claude
+    private struct OutgoingToolCall: Encodable {
+        let id: String
+        let type = "function"
+        let function: Function
+        struct Function: Encodable { let name: String; let arguments: String }
+
+        init(_ call: ToolCall) {
+            id = call.id
+            function = Function(name: call.name, arguments: call.arguments)
+        }
+    }
 
     /// One entry in the OpenAI `tools` array: `{type:"function", function:{name, description, parameters}}`.
     private struct ToolWire: Encodable {
@@ -194,52 +269,20 @@ public struct OpenAIChatExecutor: Executor {
         struct Function: Encodable {
             let name: String
             let description: String
-            let parameters: JSONSchemaWire
+            let parameters: JSONValue
         }
         init(_ d: ToolDescriptor) {
             function = Function(name: d.name, description: d.description,
-                                parameters: JSONSchemaWire(d.inputSchema))
+                                parameters: OpenAIChatExecutor.wireSchema(d.inputSchema))
         }
     }
 
-    /// Encodes a `PipelineAST.JSONSchema` as a standard JSON Schema object for tool parameters.
-    private struct JSONSchemaWire: Encodable {
-        let schema: JSONSchema
-        init(_ schema: JSONSchema) { self.schema = schema }
-
-        private enum K: String, CodingKey { case type, properties, required, items, oneOf }
-        private struct DynamicKey: CodingKey {
-            let stringValue: String; var intValue: Int? { nil }
-            init(_ s: String) { stringValue = s }
-            init?(stringValue: String) { self.stringValue = stringValue }
-            init?(intValue: Int) { nil }
-        }
-
-        func encode(to encoder: Encoder) throws {
-            switch schema {
-            case .object(let properties, let required):
-                var c = encoder.container(keyedBy: K.self)
-                try c.encode("object", forKey: .type)
-                var props = c.nestedContainer(keyedBy: DynamicKey.self, forKey: .properties)
-                for (key, value) in properties {
-                    try props.encode(JSONSchemaWire(value), forKey: DynamicKey(key))
-                }
-                if !required.isEmpty { try c.encode(required, forKey: .required) }
-            case .array(let items):
-                var c = encoder.container(keyedBy: K.self)
-                try c.encode("array", forKey: .type)
-                try c.encode(JSONSchemaWire(items), forKey: .items)
-            case .string:  var c = encoder.container(keyedBy: K.self); try c.encode("string", forKey: .type)
-            case .integer: var c = encoder.container(keyedBy: K.self); try c.encode("integer", forKey: .type)
-            case .number:  var c = encoder.container(keyedBy: K.self); try c.encode("number", forKey: .type)
-            case .boolean: var c = encoder.container(keyedBy: K.self); try c.encode("boolean", forKey: .type)
-            case .any:
-                var c = encoder.singleValueContainer(); try c.encode([String: String]())
-            case .oneOf(let schemas):
-                var c = encoder.container(keyedBy: K.self)
-                try c.encode(schemas.map(JSONSchemaWire.init), forKey: .oneOf)
-            }
-        }
+    /// A tool's parameters as standard JSON Schema: the object graph every tool path builds
+    /// (`JSONSchema.standardObject()`), carried through `Encodable` as a `JSONValue`.
+    private static func wireSchema(_ schema: JSONSchema) -> JSONValue {
+        guard let data = try? JSONSerialization.data(withJSONObject: schema.standardObject()),
+              let value = try? JSONDecoder().decode(JSONValue.self, from: data) else { return .object([:]) }
+        return value
     }
 
     private struct ChatRequest: Encodable {
@@ -299,6 +342,7 @@ public struct OpenAIChatExecutor: Executor {
     private func chat(
         system: String,
         user: String,
+        history: [ConversationTurn],
         tools: [ToolDescriptor],
         temperature: Double?,
         maxTokens: Int?
@@ -313,10 +357,7 @@ public struct OpenAIChatExecutor: Executor {
         req.httpBody = try JSONEncoder().encode(
             ChatRequest(
                 model: config.model,
-                messages: [
-                    .init(role: "system", content: system),
-                    .init(role: "user",   content: user)
-                ],
+                messages: Self.messages(system: system, user: user, history: history),
                 tools: tools.isEmpty ? nil : tools.map(ToolWire.init),
                 temperature: temperature,
                 maxTokens: maxTokens

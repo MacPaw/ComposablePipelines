@@ -2,7 +2,7 @@
 //  ScriptedExecutor.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -13,10 +13,10 @@ import PipelineAST
 /// A scripted ``Executor`` for tests: the test supplies each model output, so intermediate
 /// `@State` values are meaningful. (``MockExecutor`` reports `noBackend` for every model
 /// call, which the walker turns into an empty-string fallback — fine for structural traces,
-/// useless for asserting produced values.) Guardrails pass by default.
+/// useless for asserting produced values.)
 ///
 /// `Run` (client task) closures are *not* routed here — they are captured at lowering and run
-/// as written, so only `Model`/`Guardrail` steps need scripting.
+/// as written, so only `Model` steps need scripting.
 struct ScriptedExecutor: Executor {
 
     /// One resolved model invocation. Inputs are decoded best-effort to `String` for routing.
@@ -25,17 +25,17 @@ struct ScriptedExecutor: Executor {
         let input: String
         let outputTypeName: String
         let requirements: ModelSelectionRequirements?
+        /// The tools the step actually advertised, *after* the walker applied any
+        /// `Model.toolAllowlist(_:)` narrowing — so a test can assert what the model was shown.
+        let tools: [ToolDescriptor]
+        /// The context items the walker resolved from the step's slots.
+        let contextItems: [ContextItem]
     }
 
     private let respond: @Sendable (ModelCall) throws -> ExecutionValue
-    private let guardrailPasses: Bool
 
-    init(
-        guardrailPasses: Bool = true,
-        respond: @escaping @Sendable (ModelCall) throws -> ExecutionValue
-    ) {
+    init(respond: @escaping @Sendable (ModelCall) throws -> ExecutionValue) {
         self.respond = respond
-        self.guardrailPasses = guardrailPasses
     }
 
     func runModel(
@@ -43,11 +43,6 @@ struct ScriptedExecutor: Executor {
         arguments: ModelArguments,
         onDelta: (@Sendable (String) -> Void)?
     ) async throws -> ExecutionValue {
-        // Guardrails now lower to a Bool-output classification model rather than a separate seam
-        // operation; answer those with `guardrailPasses` so tests keep their pass/block control.
-        if config.outputTypeName == "Bool" {
-            return try JSONEncoder().encode(guardrailPasses)
-        }
         let instructions: String
         if case .systemPrompt(let prompt) = arguments["systemPrompt"] {
             instructions = prompt
@@ -63,14 +58,20 @@ struct ScriptedExecutor: Executor {
         } else {
             input = ""
         }
-        return try respond(
+        let output = try respond(
             ModelCall(
                 instructions: instructions,
                 input: input,
                 outputTypeName: config.outputTypeName,
-                requirements: ModelSelectionRequirements(traits: config.traits)
+                requirements: ModelSelectionRequirements(traits: config.traits),
+                tools: arguments.tools,
+                contextItems: arguments.contextItems
             )
         )
+        // Emitted as one chunk so streaming has something to observe at all. Without it nothing in this
+        // package could test what the walker attaches to a delta — the sink existed and was never fed.
+        onDelta?(Self.decodeString(output))
+        return output
     }
 
     /// JSON-decode bytes to `String`; fall back to the raw UTF-8 view so non-`String`

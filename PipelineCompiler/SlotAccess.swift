@@ -2,7 +2,7 @@
 //  SlotAccess.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -54,28 +54,48 @@ extension SlotAccess {
 
         case let .loop(content):
             walk(content, into: &access)
+
+        case let .branch(conditionSlotID, then, otherwise):
+            access.reads.insert(conditionSlotID)
+            walk(then, into: &access)
+            walk(otherwise, into: &access)
+
+        case let .whileLoop(conditionSlotID, body):
+            access.reads.insert(conditionSlotID)
+            walk(body, into: &access)
         }
+    }
+
+    /// Records the slots a `ModelConfig` touches, for both the `.model` and `.modelInput` leaves.
+    ///
+    /// Every slot-backed field is a read the walker performs just before the call, so each needs a
+    /// dependency edge or the topological sort may order the model ahead of the step that fills it.
+    /// Shared so the two leaves cannot disagree — `.modelInput` previously omitted `priorTurnsSlotID`.
+    ///
+    /// - Author: Claude
+    private static func recordModelConfigAccess(_ config: ModelConfig, into access: inout SlotAccess) {
+        for id in config.contextItemsSlotIDs { access.reads.insert(id) }
+        if let id = config.priorTurnsSlotID { access.reads.insert(id) }
+        if let id = config.toolAllowlistSlotID { access.reads.insert(id) }
+        if let id = config.streamingReplySlotID { access.writes.insert(id) }
     }
 
     private static func walkLeaf(_ leaf: PipelineGraphLeaf, into access: inout SlotAccess) {
         switch leaf {
-        case let .router(query, _):
-            walk(query, into: &access)
+        case let .classify(text, _, _):
+            walk(text, into: &access)
 
         case let .dagPlan(query, _, _):
             walk(query, into: &access)
 
-        case let .relevanceRank(query, _, _, _):
+        case let .relevanceRank(query, _, _):
             walk(query, into: &access)
 
         case let .model(config, _):
-            for id in config.contextItemsSlotIDs { access.reads.insert(id) }
-            if let id = config.priorTurnsSlotID { access.reads.insert(id) }
-            if let id = config.streamingReplySlotID { access.writes.insert(id) }
+            recordModelConfigAccess(config, into: &access)
 
         case let .modelInput(config, _, input):
-            for id in config.contextItemsSlotIDs { access.reads.insert(id) }
-            if let id = config.streamingReplySlotID { access.writes.insert(id) }
+            recordModelConfigAccess(config, into: &access)
             walk(input, into: &access)
 
         case let .summarize(textBindingId, _, _):
@@ -112,6 +132,12 @@ extension SlotAccess {
 
         case let .memoryStore(plan, _):
             walk(plan, into: &access)
+
+        case let .delegate(_, tasksSlotID, _, _, _, _):
+            // The delegate reads its task list from the parent scope. The child template runs in an
+            // isolated scope (its slots — including taskInputSlotID — never touch the parent), so we
+            // deliberately do NOT walk `child` here.
+            access.reads.insert(tasksSlotID)
 
         case .opaque:
             break

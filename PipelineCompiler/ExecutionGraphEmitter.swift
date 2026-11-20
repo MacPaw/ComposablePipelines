@@ -2,7 +2,7 @@
 //  ExecutionGraphEmitter.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -156,6 +156,12 @@ struct ExecutionGraphEmitter {
 
         case let .loop(content):
             return .loopScope(emitAST(content))
+
+        case let .branch(conditionSlotID, then, otherwise):
+            return .branch(conditionSlotID: conditionSlotID, then: emitAST(then), otherwise: emitAST(otherwise))
+
+        case let .whileLoop(conditionSlotID, body):
+            return .whileLoop(conditionSlotID: conditionSlotID, body: emitAST(body))
         }
     }
 
@@ -163,14 +169,29 @@ struct ExecutionGraphEmitter {
         let operation: PipelineExecutionGraph.Operation
 
         switch leaf {
-        case let .router(query, tools):
-            operation = .router(query: emitAST(query), tools: tools)
+        case let .classify(text, task, spec):
+            operation = .classify(text: emitAST(text), task: task, spec: spec)
 
         case let .dagPlan(query, tools, hints):
             operation = .dagPlan(query: emitAST(query), tools: tools, hints: hints)
 
-        case let .relevanceRank(query, tools, threshold, topK):
-            operation = .relevanceRank(query: emitAST(query), tools: tools, threshold: threshold, topK: topK)
+        case let .relevanceRank(query, tools, topK):
+            operation = .relevanceRank(query: emitAST(query), tools: tools, topK: topK)
+
+        case let .delegate(child, tasksSlotID, taskInputSlotID, budgetTotal, leafReserve, inherit):
+            let emittedChild: DelegateChild<PipelineExecutionGraph>
+            switch child {
+            case let .embedded(childGraph): emittedChild = .embedded(emitAST(childGraph))
+            case .selfRecursion:            emittedChild = .selfRecursion
+            }
+            operation = .delegate(
+                child: emittedChild,
+                tasksSlotID: tasksSlotID,
+                taskInputSlotID: taskInputSlotID,
+                budgetTotal: budgetTotal,
+                leafReserve: leafReserve,
+                inherit: inherit
+            )
 
         case let .model(config, arguments):
             operation = .model(config: config, arguments: arguments)

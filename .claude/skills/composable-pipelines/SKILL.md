@@ -1,6 +1,6 @@
 ---
 name: composable-pipelines
-description: Build AI pipelines with the ComposablePipelines Swift package — author a declarative Pipeline (result-builder DSL + @State), compile it to a graph, and run it through an Executor. Use when writing or debugging ComposablePipelines code: Pipeline/Model/Guardrail/While/ForEach/ClientTask, @State data flow, the Executor seam, reactive While/branching, tool-calling agent loops, or when a file imports ComposablePipelines / PipelineDSL / PipelineCompiler / ExecutionEngine.
+description: Build AI pipelines with the ComposablePipelines Swift package — author a declarative Pipeline (result-builder DSL + @State), compile it to a graph, and run it through an Executor. Use when writing or debugging ComposablePipelines code: Pipeline/Model/While/ForEach/ClientTask, @State data flow, the Executor seam, reactive While/branching, tool-calling agent loops, or when a file imports ComposablePipelines / PipelineDSL / PipelineCompiler / ExecutionEngine.
 ---
 
 # Composable Pipelines
@@ -47,7 +47,7 @@ let text   = try JSONDecoder().decode(String.self, from: result)   // ExecutionV
 - **Model** (output-only generic): `Model<Output>()` then chain `.systemPrompt(_)`,
   `.input { $slot.get() }` **or** `.message(staticValue)`, and optionally `.tools([…])`,
   `.temperature(_)`, `.maxTokens(_)`, `.requirements(ModelSelectionRequirements(traits: […]))`.
-- **Primitives**: `Guardrail(input, rules:allowed:blocked:)`, `While(condition:) { … }`,
+- **Primitives**: `While(condition:) { … }`,
   `Group { … }`, `ForEach(in: xs) { x in … }`, `Summarize(text: $slot, maxTokens:)`,
   `ClientTask(input: $slot) { value in … }`, `From(provider, query: $slot)`, `Self.return(value)`.
 - **Control flow**: use native `if` / `switch` on produced state (e.g. `if verdict == "trivial"`).
@@ -81,7 +81,17 @@ OpenAI-compatible endpoint (local or remote).
 
 ## Tool-calling agents
 
-A model step whose output is `ModelTurn` can request tools; you dispatch them and loop:
+For a ready loop with compaction and stop logic, use `AgentLoop` (build it once — stored or
+as the root pipeline, never inside `body` — and one value per run):
+
+```swift
+let agent = AgentLoop(task: task, tools: tools, systemPrompt: prompt, maxTurns: 30)
+    .finishTool()                 // `finish` call ends the run with its message
+    .probe(watching: workspace)   // warn off a fixed point; warned again later → forced answer
+    .answerOnLastTurn()           // last turn of the budget is a tool-free answer
+```
+
+By hand, a model step whose output is `ModelTurn` can request tools; you dispatch them and loop:
 
 ```swift
 While(condition: { reply.isEmpty && turns < maxTurns }) {

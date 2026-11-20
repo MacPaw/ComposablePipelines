@@ -2,7 +2,7 @@
 //  Model.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -49,7 +49,9 @@ public struct Model<Output: ModelOutput>: Sendable {
     public init(requirements: ModelSelectionRequirements = .default) {
         config = ModelConfig(
             outputTypeName: Output.outputTypeName,
-            traits: requirements.traits
+            traits: requirements.traits,
+            backend: requirements.backend,
+            spec: requirements.spec
         )
         arguments = [:]
     }
@@ -135,13 +137,9 @@ public struct Model<Output: ModelOutput>: Sendable {
 
     public func requirements(_ value: ModelSelectionRequirements) -> Self {
         var copy = self
-        copy.config = ModelConfig(
-            outputTypeName: config.outputTypeName,
-            traits: value.traits,
-            streamingReplySlotID: config.streamingReplySlotID,
-            contextItemsSlotIDs: config.contextItemsSlotIDs,
-            priorTurnsSlotID: config.priorTurnsSlotID
-        )
+        copy.config.traits = value.traits
+        copy.config.backend = value.backend
+        copy.config.spec = value.spec
         return copy
     }
 
@@ -178,13 +176,36 @@ public struct Model<Output: ModelOutput>: Sendable {
     /// at execution time and appends it to any context already registered via `.context { }`.
     public func contextItems(_ binding: Binding<[ContextItem]>) -> Self {
         var copy = self
-        copy.config = ModelConfig(
-            outputTypeName: config.outputTypeName,
-            traits: config.traits,
-            streamingReplySlotID: config.streamingReplySlotID,
-            contextItemsSlotIDs: config.contextItemsSlotIDs + [binding.id],
-            priorTurnsSlotID: config.priorTurnsSlotID
-        )
+        copy.config.contextItemsSlotIDs.append(binding.id)
+        return copy
+    }
+
+    /// Narrows the tools this step advertises to the names held in `binding`'s slot, resolved at
+    /// execution time.
+    ///
+    /// The catalog declared via ``tools(_:)`` stays the upper bound: a name that is not in it is
+    /// ignored, so an allowlist can only ever *restrict* what the model sees. That one-way property is
+    /// what makes it safe to fill the slot from a model's own output — a delegate parent hands each
+    /// subagent the tool subset it asked for, and no subagent can widen its own reach.
+    ///
+    /// ```swift
+    /// Model<ModelTurn>.plan(systemPrompt: "…", tools: menu.tools)
+    ///     .toolAllowlist($granted)   // slot holds e.g. ["get_weather"]
+    ///     .input { $instruction.get() }
+    /// ```
+    ///
+    /// **Fails closed.** An unwritten slot grants *no* tools, not all of them, and undecodable data
+    /// throws ``ExecutionError/toolAllowlistDecodingFailed(slotID:underlyingError:)`` rather than falling
+    /// back to the full catalogue — a grant that silently widens on a mistake is the one failure mode a
+    /// permission check must not have. Bind the slot on every path that reaches this step.
+    ///
+    /// Calling this more than once keeps the last binding — allowlists compose by intersection, which
+    /// chaining cannot express.
+    ///
+    /// - Author: Claude
+    public func toolAllowlist(_ binding: Binding<[String]>) -> Self {
+        var copy = self
+        copy.config.toolAllowlistSlotID = binding.id
         return copy
     }
 
@@ -199,13 +220,7 @@ public struct Model<Output: ModelOutput>: Sendable {
     /// slot at execution time and injects it as ``ModelArgument/priorTurns(_:)`` before calling the resource.
     public func priorTurns(_ binding: Binding<[ConversationTurn]>) -> Self {
         var copy = self
-        copy.config = ModelConfig(
-            outputTypeName: config.outputTypeName,
-            traits: config.traits,
-            streamingReplySlotID: config.streamingReplySlotID,
-            contextItemsSlotIDs: config.contextItemsSlotIDs,
-            priorTurnsSlotID: binding.id
-        )
+        copy.config.priorTurnsSlotID = binding.id
         return copy
     }
 

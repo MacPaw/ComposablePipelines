@@ -2,7 +2,7 @@
 //  CodingAgentAdapter.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -54,7 +54,8 @@ public actor CodingAgentAdapter: ChatAgent {
         onEvent(.thinking)
         let pipeline = CodingAgentPipeline(
             task: composeTask(message), tools: defaultCodingTools(jail: jail), maxTurns: maxTurns,
-            contextTokens: contextTokens, maxOutputTokens: maxOutputTokens, compaction: compaction)
+            contextTokens: contextTokens, maxOutputTokens: maxOutputTokens, compaction: compaction,
+            jail: jail)
 
         let result = try await PipelineRunner.run(pipeline, executor: executor) { event in
             switch event {

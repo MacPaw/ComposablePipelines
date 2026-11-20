@@ -2,7 +2,7 @@
 //  OpenAIChatExecutorTests.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -202,6 +202,48 @@ extension OpenAIChatExecutorTests {
         XCTAssertNil(json["max_tokens"], "max_tokens must be omitted when not set")
     }
 
+    /// A replayed tool exchange goes out as role-tagged messages the provider can pair up: the
+    /// assistant turn carries its `tool_calls` (and no empty `content`), the result carries the
+    /// matching `tool_call_id`, and an empty trailing message is not sent at all.
+    ///
+    /// - Author: Claude
+    func testRunModel_priorTurns_sendsToolExchangeOnTheWire() async throws {
+        StubURLProtocol.handler = { req in
+            let body = Data(#"{"choices":[{"message":{"role":"assistant","content":"done"}}]}"#.utf8)
+            return (HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, body)
+        }
+        let args: ModelArguments = [
+            "systemPrompt": .systemPrompt("sys"),
+            "priorTurns": .priorTurns([
+                ConversationTurn(role: "user", content: "Task: list"),
+                ConversationTurn(role: "assistant", content: "", toolCalls: [
+                    ToolCall(id: "c1", name: "list_dir", arguments: #"{"path":"."}"#),
+                ]),
+                ConversationTurn(role: "tool", content: "a.txt", toolCallID: "c1"),
+            ]),
+            "message": .message(.string("")),
+        ]
+        _ = try await stubbedExecutor().runModel(
+            config: ModelConfig(outputTypeName: ModelTurn.outputTypeName), arguments: args, onDelta: nil)
+
+        let sent = try XCTUnwrap(StubURLProtocol.lastRequestBody)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: sent) as? [String: Any])
+        let messages = try XCTUnwrap(json["messages"] as? [[String: Any]])
+        XCTAssertEqual(messages.map { $0["role"] as? String }, ["system", "user", "assistant", "tool"])
+
+        let assistant = messages[2]
+        XCTAssertNil(assistant["content"], "an empty content next to tool_calls must be omitted")
+        let calls = try XCTUnwrap(assistant["tool_calls"] as? [[String: Any]])
+        XCTAssertEqual(calls.first?["id"] as? String, "c1")
+        XCTAssertEqual(calls.first?["type"] as? String, "function")
+        let function = try XCTUnwrap(calls.first?["function"] as? [String: String])
+        XCTAssertEqual(function["name"], "list_dir")
+        XCTAssertEqual(function["arguments"], #"{"path":"."}"#)
+
+        XCTAssertEqual(messages[3]["tool_call_id"] as? String, "c1")
+        XCTAssertEqual(messages[3]["content"] as? String, "a.txt")
+    }
+
     func testRunModel_modelTurnOutput_wrapsReply() async throws {
         StubURLProtocol.handler = { req in
             let body = Data(#"{"choices":[{"message":{"role":"assistant","content":"answer"}}]}"#.utf8)
@@ -315,6 +357,67 @@ extension OpenAIChatExecutorTests {
         let props = try XCTUnwrap(params["properties"] as? [String: Any])
         let pathSchema = try XCTUnwrap(props["path"] as? [String: Any])
         XCTAssertEqual(pathSchema["type"] as? String, "string")
+    }
+
+    /// The one converter every dictionary-based path uses: descriptions merge into the node they wrap,
+    /// the outermost winning, and `required` is left out when empty unless asked for.
+    ///
+    /// - Author: Claude
+    func testStandardObjectIsTheSharedConverter() {
+        let schema = JSONSchema.object(properties: [
+            "path": JSONSchema.string.described("A path"),
+            "any": JSONSchema.any.described("inner").described("outer"),
+            "tags": .array(items: JSONSchema.string.described("A tag")),
+        ], required: [])
+        let plain = schema.standardObject() as NSDictionary
+        XCTAssertEqual(plain, [
+            "type": "object",
+            "properties": [
+                "path": ["type": "string", "description": "A path"],
+                "any": ["description": "outer"],
+                "tags": ["type": "array", "items": ["type": "string", "description": "A tag"]],
+            ],
+        ] as NSDictionary)
+        XCTAssertEqual(schema.standardObject(includingEmptyRequired: true)["required"] as? [String], [])
+    }
+
+    /// Descriptions reach the wire at any depth; a nested one gives way to the outer one, and a
+    /// described `.any` — single-value on the encoder — is no crash, nested or not.
+    ///
+    /// - Author: Claude
+    func testRunModel_serializesDescribedParameters() async throws {
+        StubURLProtocol.handler = { req in
+            let body = Data(#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#.utf8)
+            return (HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, body)
+        }
+        let descriptor = ToolDescriptor(
+            name: "probe",
+            description: "Probe",
+            inputSchema: .object(properties: [
+                "path": JSONSchema.string.described("A path"),
+                "value": JSONSchema.any.described("inner").described("outer"),
+                "count": JSONSchema.integer.described("inner").described("outer"),
+            ], required: ["path"]))
+        let args: ModelArguments = [
+            "systemPrompt": .systemPrompt("s"),
+            "message": .message(.string("u")),
+            "tools": .tools([descriptor])
+        ]
+        _ = try await stubbedExecutor().runModel(
+            config: ModelConfig(outputTypeName: "String"), arguments: args, onDelta: nil)
+
+        let sent = try XCTUnwrap(StubURLProtocol.lastRequestBody)
+        let json = try JSONSerialization.jsonObject(with: sent) as! [String: Any]
+        let function = try XCTUnwrap((json["tools"] as? [[String: Any]])?.first?["function"] as? [String: Any])
+        let props = try XCTUnwrap((function["parameters"] as? [String: Any])?["properties"] as? [String: Any])
+        let path = try XCTUnwrap(props["path"] as? [String: Any])
+        XCTAssertEqual(path["type"] as? String, "string")
+        XCTAssertEqual(path["description"] as? String, "A path")
+        let value = try XCTUnwrap(props["value"] as? [String: Any])
+        XCTAssertEqual(value as NSDictionary, ["description": "outer"] as NSDictionary)
+        let count = try XCTUnwrap(props["count"] as? [String: Any])
+        XCTAssertEqual(count["type"] as? String, "integer")
+        XCTAssertEqual(count["description"] as? String, "outer")
     }
 
     func testRunModel_parsesToolCallsIntoModelTurn() async throws {

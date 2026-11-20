@@ -2,7 +2,7 @@
 //  ResearchBriefPipeline.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -22,7 +22,6 @@ import PipelineDSL
 /// - `ForEach(chunks) { … }` without the `in:` label
 /// - `While(!review.approved) { … }` autoclosure condition
 /// - `Run($a, $b) { … }` multi-binding host task, and `$slot.map { … }` transforms
-/// - `Barrier { GateGuardrail(.politics, .pii) { … } }` named grouping + variadic gate
 /// - a bare `$slot` as the final line == `$slot.get()`
 struct ResearchBriefPipeline: Pipeline {
     typealias Output = String
@@ -37,11 +36,6 @@ struct ResearchBriefPipeline: Pipeline {
     @State var wordCount = 0
 
     var body: some Pipeline {
-        // Named barrier instead of Group(gate: true); variadic gate instead of rules: [ ... ].
-        Barrier {
-            GateGuardrail(.politics, .pii) { Just(value: question) }
-        }
-
         // Unlabeled ForEach; unlabeled Model prompt; producer-first assign.
         ForEach(chunks) { chunk in
             Model<String>("Extract facts relevant to: \(question)")

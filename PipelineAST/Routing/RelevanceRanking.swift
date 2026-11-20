@@ -2,21 +2,19 @@
 //  RelevanceRanking.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
 public struct RelevanceRankingRequest: Codable, Sendable {
     public let query: String
     public let tools: [ToolDescriptor]
-    public let threshold: Float
     /// Maximum number of ranked tools to return (sorted descending by score).
     public let topK: Int
 
-    public init(query: String, tools: [ToolDescriptor], threshold: Float = 0.5, topK: Int = 30) {
+    public init(query: String, tools: [ToolDescriptor], topK: Int = 30) {
         self.query = query
         self.tools = tools
-        self.threshold = threshold
         self.topK = topK
     }
 }

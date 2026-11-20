@@ -2,7 +2,7 @@
 //  KnowledgeBaseQAPipeline.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -15,9 +15,6 @@ import PipelineDSL
 /// - `From` — pull `[ContextItem]` from any `ContextItemsProvider` (a vector store, a memory
 ///   service, or a fixture like ``InMemoryKnowledgeBase`` below) using the question as the query.
 /// - Routing retrieved context into a `Model` as its typed input.
-///
-/// (For input gating, see the `Guardrail` classification in ``ContentModerationPipeline`` /
-/// ``ContentWriterPipeline``.)
 struct KnowledgeBaseQAPipeline: Pipeline {
     typealias Output = String
 

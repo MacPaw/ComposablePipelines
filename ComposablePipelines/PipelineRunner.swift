@@ -2,7 +2,7 @@
 //  PipelineRunner.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -21,13 +21,13 @@ import ExecutionEngine
 /// every commit batch, feeds committed slot values back into a persistent DSL `ExecutionContext`,
 /// and hands the engine a cursor-trimmed graph so already-executed surface tasks are not repeated.
 ///
-/// `ClientTask` closures are captured at lowering and run as written; only `Model`/`Guardrail`
-/// steps consult the `executor`.
+/// `ClientTask` closures are captured at lowering and run as written; only `Model` steps consult
+/// the `executor`.
 public enum PipelineRunner {
 
     /// Run `pipeline` to completion, returning its final output value.
     /// - Parameters:
-    ///   - executor: backs `Model`/`Guardrail` steps.
+    ///   - executor: backs `Model` steps.
     ///   - initialSlots: seed values for `@State` slots, keyed by slot id.
     ///   - maxReexecutionDepth: hard cap on loop/re-execution iterations (matches the walker default).
     ///   - observingExecution: receives every `ExecutionEvent` as the walk progresses.

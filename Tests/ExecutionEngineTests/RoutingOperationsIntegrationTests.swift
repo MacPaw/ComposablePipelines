@@ -2,7 +2,7 @@
 //  RoutingOperationsIntegrationTests.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -22,15 +22,6 @@ import PipelineDSL
 final class RoutingOperationsIntegrationTests: XCTestCase {
 
     // MARK: - Pipeline fixtures
-
-    private struct RouterPipeline: Pipeline {
-        let query: String
-        @State("route") var route = WorkflowRoute.default.rawValue
-        var body: some Pipeline {
-            $route.set { Router(query, tools: []) }
-            $route.get()
-        }
-    }
 
     private struct DAGPlannerPipeline: Pipeline {
         let query: String
@@ -56,7 +47,6 @@ final class RoutingOperationsIntegrationTests: XCTestCase {
     /// Wraps `ScriptedExecutor` for model calls and overrides only the routing seam methods.
     private struct RoutingScriptedExecutor: Executor {
         let base: ScriptedExecutor
-        let routerReply: WorkflowRoute?
         let dagReply: DAGPlanningResult?
         let rankReply: RelevanceRankingResult?
 
@@ -66,11 +56,6 @@ final class RoutingOperationsIntegrationTests: XCTestCase {
             onDelta: (@Sendable (String) -> Void)?
         ) async throws -> ExecutionValue {
             try await base.runModel(config: config, arguments: arguments, onDelta: onDelta)
-        }
-
-        func runRouter(query: ExecutionValue, tools: [ToolDescriptor]) async throws -> ExecutionValue {
-            guard let route = routerReply else { throw ExecutorError.noBackend }
-            return try JSONEncoder().encode(route.rawValue)
         }
 
         func runDAGPlan(
@@ -85,7 +70,6 @@ final class RoutingOperationsIntegrationTests: XCTestCase {
         func runRelevanceRank(
             query: ExecutionValue,
             tools: [ToolDescriptor],
-            threshold: Float,
             topK: Int
         ) async throws -> ExecutionValue {
             guard let result = rankReply else { throw ExecutorError.noBackend }
@@ -100,28 +84,6 @@ final class RoutingOperationsIntegrationTests: XCTestCase {
         description: "Ping a host",
         inputSchema: .object(properties: ["hostname": .string], required: ["hostname"])
     )
-
-    // MARK: - Router
-
-    func testRouter_noBackend_fallsBackToDefaultRoute() async throws {
-        let pipeline = RouterPipeline(query: "hello")
-        let (result, _) = try await PipelineRun.runOnce(pipeline, executor: ScriptedExecutor.sequence([""]))
-        let route = try JSONDecoder().decode(String.self, from: result)
-        XCTAssertEqual(route, WorkflowRoute.default.rawValue)
-    }
-
-    func testRouter_happyPath_returnsScriptedRoute() async throws {
-        let pipeline = RouterPipeline(query: "ping google.com")
-        let executor = RoutingScriptedExecutor(
-            base: ScriptedExecutor.sequence([""]),
-            routerReply: .complexToolCall,
-            dagReply: nil,
-            rankReply: nil
-        )
-        let (result, _) = try await PipelineRun.runOnce(pipeline, executor: executor)
-        let route = try JSONDecoder().decode(String.self, from: result)
-        XCTAssertEqual(route, WorkflowRoute.complexToolCall.rawValue)
-    }
 
     // MARK: - DAGPlanner
 
@@ -140,7 +102,6 @@ final class RoutingOperationsIntegrationTests: XCTestCase {
         let pipeline = DAGPlannerPipeline(query: "flip then crop")
         let executor = RoutingScriptedExecutor(
             base: ScriptedExecutor.sequence([""]),
-            routerReply: nil,
             dagReply: DAGPlanningResult(text: nil, dag: dag),
             rankReply: nil
         )
@@ -172,7 +133,6 @@ final class RoutingOperationsIntegrationTests: XCTestCase {
         let pipeline = RelevanceRankerPipeline(query: "is google.com up?", tools: tools)
         let executor = RoutingScriptedExecutor(
             base: ScriptedExecutor.sequence([""]),
-            routerReply: nil,
             dagReply: nil,
             rankReply: scripted
         )

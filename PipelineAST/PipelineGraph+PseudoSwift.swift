@@ -2,7 +2,7 @@
 //  PipelineGraph+PseudoSwift.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -57,6 +57,20 @@ private enum PseudoSwiftEmitter {
             lines.append("\(pad)}")
             return lines
 
+        case let .branch(conditionSlotID, then, otherwise):
+            var lines = ["\(pad)if $\(conditionSlotID.uuidString.prefix(8)) {"]
+            lines.append(contentsOf: emit(then, indent: indent + 1))
+            lines.append("\(pad)} else {")
+            lines.append(contentsOf: emit(otherwise, indent: indent + 1))
+            lines.append("\(pad)}")
+            return lines
+
+        case let .whileLoop(conditionSlotID, body):
+            var lines = ["\(pad)while $\(conditionSlotID.uuidString.prefix(8)) {"]
+            lines.append(contentsOf: emit(body, indent: indent + 1))
+            lines.append("\(pad)}")
+            return lines
+
         case let .leaf(leaf):
             switch leaf {
             case let .executionStateSet(id, _, valueGraph, label, _):
@@ -92,17 +106,19 @@ private enum PseudoSwiftEmitter {
 
     private static func leafExpression(_ leaf: PipelineGraphLeaf) -> String {
         switch leaf {
-        case let .router(queryGraph, _):
-            let inner = emit(queryGraph, indent: 0).joined(separator: " ")
-            return "Router { \(inner) }"
+        case let .classify(textGraph, task, spec):
+            let inner = emit(textGraph, indent: 0).joined(separator: " ")
+            let pin = spec?.pinDescription.map { ", spec: \"\($0)\"" } ?? ""
+            let verb = task.kind.yieldsSpans ? "Detect" : "Classify"
+            return "\(verb)(\(task)\(pin)) { \(inner) }"
 
         case let .dagPlan(queryGraph, tools, hints):
             let inner = emit(queryGraph, indent: 0).joined(separator: " ")
             return "DAGPlanner(tools: \(tools.count), hints: \(hints.count)) { \(inner) }"
 
-        case let .relevanceRank(queryGraph, tools, threshold, topK):
+        case let .relevanceRank(queryGraph, tools, topK):
             let inner = emit(queryGraph, indent: 0).joined(separator: " ")
-            return "RelevanceRanker(tools: \(tools.count), threshold: \(threshold), topK: \(topK)) { \(inner) }"
+            return "RelevanceRanker(tools: \(tools.count), topK: \(topK)) { \(inner) }"
 
         case let .model(config, arguments):
             let escOut = config.outputTypeName
@@ -163,6 +179,14 @@ private enum PseudoSwiftEmitter {
         case let .memoryStore(planGraph, mode):
             let inner = emit(planGraph, indent: 0).joined(separator: " ")
             return "memory.store(mode: .\((mode ?? .sync).rawValue), plan: \(inner))"
+        case let .delegate(child, tasksSlotID, taskInputSlotID, budgetTotal, leafReserve, inherit):
+            let inner: String
+            switch child {
+            case let .embedded(childGraph): inner = emit(childGraph, indent: 0).joined(separator: " ")
+            case .selfRecursion:            inner = "self"
+            }
+            return "delegate(tasks: \"\(tasksSlotID.uuidString)\", into: \"\(taskInputSlotID.uuidString)\", "
+                + "budget: \(budgetTotal)/\(leafReserve), inherit: \(inherit.rawValue), child: \(inner))"
         }
     }
 

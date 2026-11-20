@@ -2,7 +2,7 @@
 //  Group.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -98,7 +98,7 @@ extension Concurrent: ASTNodeRepresentable {
 ///
 /// ```swift
 /// Barrier {
-///     GateGuardrail(.politics, .pii) { $message.get() }
+///     Model<Bool>("Is this request on topic?").input { $message }
 /// }
 /// ```
 public struct Barrier<Content: Pipeline>: Pipeline, PipelineStructuralNode {
