@@ -2,7 +2,7 @@
 //  PipelineConstructionTests.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -363,108 +363,6 @@ final class PipelineConstructionTests: XCTestCase {
         encoder.outputFormatting = [.sortedKeys]
         let data = try graph.encoded(using: encoder)
         XCTAssertEqual(try PipelineGraph.decode(from: data), graph)
-    }
-
-    // MARK: - Composed guardrail
-
-    func testGuardrailClassification_lowersToModelInputLeaf() {
-        let graph = GuardrailClassification(
-            "Contact me at alex@example.com",
-            rules: [.illegal]
-        ).pipelineGraph
-
-        guard case let .leaf(.modelInput(config, arguments, query)) = graph else {
-            return XCTFail("Expected modelInput leaf, got \(PipelineGraphTestHelpers.prettyPrint(graph))")
-        }
-        XCTAssertEqual(config.outputTypeName, "Bool")
-        XCTAssertTrue(config.traits.contains(.guardrailClassification))
-        XCTAssertNotNil(arguments["guardrailRules"])
-        guard case let .leaf(.just(valueTypeName, jsonUTF8)) = query else {
-            return XCTFail("Expected constant string query input")
-        }
-        XCTAssertEqual(valueTypeName, "String")
-        XCTAssertEqual(jsonUTF8, "\"Contact me at alex@example.com\"")
-    }
-
-    func testGuardrailClassification_emptyRules_lowersToAllowedConstant() {
-        let graph = GuardrailClassification(
-            "Hello",
-            rules: []
-        ).pipelineGraph
-
-        guard case let .leaf(.just(valueTypeName, jsonUTF8)) = graph else {
-            return XCTFail("Expected constant true, got \(PipelineGraphTestHelpers.prettyPrint(graph))")
-        }
-        XCTAssertEqual(valueTypeName, "Bool")
-        XCTAssertEqual(jsonUTF8, "true")
-    }
-
-    func testGuardrail_composesClassificationStateAndBranch() {
-        let graph = Guardrail(
-            "Hello",
-            rules: [.illegal],
-            allowed: { Just(value: "allowed") },
-            blocked: { Just(value: "blocked") }
-        ).loweredGraph()
-
-        guard case let .sequence(items) = graph, items.count == 2 else {
-            return XCTFail("Expected classification followed by a branch, got \(PipelineGraphTestHelpers.prettyPrint(graph))")
-        }
-        guard case let .leaf(.executionStateSet(_, valueTypeName, value, "guardrailAllowed", .commit)) = items[0] else {
-            return XCTFail("Expected guardrail decision state write")
-        }
-        XCTAssertEqual(valueTypeName, "Bool")
-        guard case let .leaf(.modelInput(config, _, _)) = value else {
-            return XCTFail("Expected modelInput leaf in decision write, got \(PipelineGraphTestHelpers.prettyPrint(value))")
-        }
-        XCTAssertEqual(config.outputTypeName, "Bool")
-        XCTAssertTrue(config.traits.contains(.guardrailClassification))
-
-        guard case let .sequence(branchItems) = items[1],
-              case .group(sequential: true, gate: true, _) = branchItems.first else {
-            return XCTFail("Expected state-dependent native branch")
-        }
-    }
-
-    func testGuardrail_emptyRules_lowersDirectlyToAllowedBranch() {
-        let graph = Guardrail(
-            "Hello",
-            rules: [],
-            allowed: { Just(value: "allowed") },
-            blocked: { Just(value: "blocked") }
-        ).loweredGraph()
-
-        guard case let .leaf(.just(valueTypeName, jsonUTF8)) = graph else {
-            return XCTFail("Expected allowed branch only, got \(PipelineGraphTestHelpers.prettyPrint(graph))")
-        }
-        XCTAssertEqual(valueTypeName, "String")
-        XCTAssertEqual(jsonUTF8, "\"allowed\"")
-    }
-
-    func testGuardrailCreatedInsideBodyKeepsStableStateIDAcrossLowerings() {
-        struct Host: Pipeline {
-            var body: some Pipeline {
-                Guardrail(
-                    "Hello",
-                    rules: [.illegal],
-                    allowed: { Just(value: "allowed") },
-                    blocked: { Just(value: "blocked") }
-                )
-            }
-        }
-
-        func stateID(in graph: PipelineGraph) -> UUID? {
-            guard case let .sequence(items) = graph,
-                  case let .leaf(.executionStateSet(id, _, _, _, _)) = items.first else {
-                return nil
-            }
-            return id
-        }
-
-        XCTAssertEqual(
-            stateID(in: Host().loweredGraph()),
-            stateID(in: Host().loweredGraph())
-        )
     }
 
     func testStableIDSequenceUsesFixedWidth48BitSuffix() {

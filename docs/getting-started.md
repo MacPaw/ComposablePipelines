@@ -69,7 +69,7 @@ in parallel batches. Use `.none` to keep strict sequential order.
 ## 4. Walk it with an executor
 
 The walker orchestrates the run but never executes a model itself — it calls your `Executor`
-for each model/guardrail step. `ExecutionValue` is a typealias for `Data` (UTF-8 JSON): decode
+for each model step. `ExecutionValue` is a typealias for `Data` (UTF-8 JSON): decode
 inputs, encode outputs.
 
 ```swift
@@ -81,10 +81,6 @@ struct EchoExecutor: Executor {
         let system = (try? JSONDecoder().decode(String.self, from: instructions)) ?? ""
         let text   = (try? JSONDecoder().decode(String.self, from: input)) ?? ""
         return try JSONEncoder().encode("[\(system)] \(text)")
-    }
-
-    func runGuardrail(rules: [GuardrailRule]) async throws -> ExecutionValue {
-        try JSONEncoder().encode(true)   // true == passes
     }
 }
 
@@ -124,5 +120,5 @@ TaskExecutionStatus]` snapshot. See [Executors](executors.md#observing-a-run).
 - [Architecture](architecture.md) — how compilation and incremental re-execution work.
 
 > **Tip — running without a real backend.** `MockExecutor` lets the package run end to end with
-> no models: model steps return an empty-string placeholder and guardrails pass. It's for
+> no models: model steps return an empty-string placeholder. It's for
 > exercising graph shape in demos and tests, not for real output.

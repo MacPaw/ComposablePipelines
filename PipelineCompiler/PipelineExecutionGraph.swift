@@ -2,7 +2,7 @@
 //  PipelineExecutionGraph.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -28,6 +28,14 @@ public indirect enum PipelineExecutionGraph: Codable, Equatable, Sendable {
     /// finishes (so a mid-body commit doesn't tear the iteration apart via re-execution), and the
     /// body's tasks are never prefix-skipped, so each re-lowering pass re-runs the whole iteration.
     case loopScope(PipelineExecutionGraph)
+    /// Slot-driven conditional evaluated **in-graph** (compiled from ``PipelineGraph/branch(...)``):
+    /// read the `Bool` in `conditionSlotID`, walk `then` when true else `otherwise`. Works without a
+    /// `graphProvider`.
+    case branch(conditionSlotID: UUID, then: PipelineExecutionGraph, otherwise: PipelineExecutionGraph)
+    /// Slot-driven while loop iterated **in-graph** (compiled from ``PipelineGraph/whileLoop(...)``):
+    /// while the `Bool` in `conditionSlotID` is true, walk `body` (which updates the slot). Works
+    /// without a `graphProvider`.
+    case whileLoop(conditionSlotID: UUID, body: PipelineExecutionGraph)
 }
 
 // MARK: - Task
@@ -51,9 +59,9 @@ extension PipelineExecutionGraph {
     /// Mirrors `PipelineGraphLeaf` cases but references `PipelineExecutionGraph` subgraphs
     /// instead of nested AST trees.
     public enum Operation: Codable, Equatable, Sendable {
-        case router(query: PipelineExecutionGraph, tools: [ToolDescriptor])
+        case classify(text: PipelineExecutionGraph, task: ClassificationTask, spec: ModelSpecDescriptor?)
         case dagPlan(query: PipelineExecutionGraph, tools: [ToolDescriptor], hints: [String])
-        case relevanceRank(query: PipelineExecutionGraph, tools: [ToolDescriptor], threshold: Float, topK: Int)
+        case relevanceRank(query: PipelineExecutionGraph, tools: [ToolDescriptor], topK: Int)
 
         case model(config: ModelConfig, arguments: ModelArguments)
         case modelInput(
@@ -94,6 +102,19 @@ extension PipelineExecutionGraph {
         /// Evaluates a ``MemoryWritePlan`` and persists each entry through the
         /// registered ``MemoryProvider``.
         case memoryStore(plan: PipelineExecutionGraph, mode: MemoryStoreMode)
+
+        /// Agent-side delegate fan-out: run `child` once per task read from `tasksSlotID`, each in an
+        /// isolated scope with the task seeded into `taskInputSlotID`, bounded by a ``SpawnBudget``
+        /// (`budgetTotal` / `leafReserve`). Gathers distilled child results into a JSON array. `child`
+        /// is an embedded sub-graph or ``DelegateChild/selfRecursion`` (re-run the enclosing root graph).
+        case delegate(
+            child: DelegateChild<PipelineExecutionGraph>,
+            tasksSlotID: UUID,
+            taskInputSlotID: UUID,
+            budgetTotal: Int,
+            leafReserve: Int,
+            inherit: DelegateInheritance
+        )
 
         case constant(valueTypeName: String, jsonUTF8: String)
     }

@@ -2,7 +2,7 @@
 //  PipelineExecutionGraph+DropPrefix.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -33,6 +33,10 @@ extension PipelineExecutionGraph {
         case .loopScope:
             // Loop bodies are outside the surface ordinal space (see surfaceTaskCount): never
             // dropped, and they don't consume any of the `remaining` prefix budget.
+            return (self, remaining)
+
+        case .branch, .whileLoop:
+            // Slot-driven, evaluated in-graph — self-contained, outside the surface ordinal space.
             return (self, remaining)
 
         case .returnWith(let inner):
@@ -82,6 +86,10 @@ extension PipelineExecutionGraph {
             // An empty loop body means the condition is now false — the loop has exited.
             if case .empty = s { return .empty }
             return .loopScope(s)
+
+        case .branch, .whileLoop:
+            // Slot-driven in-graph nodes are self-contained and never re-lowered — leave them intact.
+            return self
 
         case .returnWith(let inner):
             let s = inner.simplified()

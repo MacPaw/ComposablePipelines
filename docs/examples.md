@@ -35,8 +35,7 @@ struct DocumentSummaryPipeline: Pipeline {
 
 ### [`ContentWriterPipeline`](../Examples/ContentWriterPipeline.swift)
 The three critiques read `draft` but not each other, so the compiler runs them **in parallel**; the
-rewrite depends on all three and waits for them. (The full source also gates the topic with a
-`Guardrail`.)
+rewrite depends on all three and waits for them.
 
 ```swift
 Model<String>("Write a short article on the topic.").input { $topic }.assign(to: $draft)
@@ -112,22 +111,6 @@ Model<String>(
 $review
 ```
 
-### [`ContentModerationPipeline`](../Examples/ContentModerationPipeline.swift)
-A `Guardrail` gates the input; `if`/`else` on the classified severity picks the path.
-
-```swift
-Guardrail(input, rules: [.politics, .pii], allowed: {
-    Model<String>("Classify severity…").input { $input }.assign(to: $severity)
-    if severity == "safe" {
-        $explanation.set("Content is safe. No action needed.")
-    } else {
-        Model<String>("Explain the violation…").input { $input }.assign(to: $explanation)
-    }
-}, blocked: {
-    Just(value: "I can't help with that — it conflicts with the safety policy.")
-})
-```
-
 ## Routing and composition
 
 ### [`CustomerSupportPipeline`](../Examples/CustomerSupportPipeline.swift)
@@ -190,7 +173,10 @@ $candidate
 
 ### [`ResearchAssistantPipeline`](../Examples/ResearchAssistantPipeline.swift)
 A tool-calling agent loop: each turn the model calls tools or answers; tool results feed back into
-the transcript until it returns a final reply.
+the transcript until it returns a final reply. This is the minimal hand-written shape; the
+core [`AgentLoop`](../ComposablePipelines/AgentLoop.swift) is the full one — compaction,
+stall recovery, and stop policies declared as modifiers (`.finishTool()`, `.probe(watching:)`,
+`.answerOnLastTurn()`).
 
 ```swift
 While(reply.isEmpty && turns < maxTurns) {
@@ -217,27 +203,19 @@ $reply
 
 ### [`CodingAgentPipeline`](../CodingAgent/CodingAgentPipeline.swift)
 The `ResearchAssistant` shape scaled up into a real coding agent: file/`bash` tools, context
-**compaction** (a sub-pipeline that summarizes the older transcript when it nears the window),
-stall recovery, and a swappable agent behind the `ChatAgent` protocol. It lives in the
+**compaction** (a sub-pipeline that summarizes the older history when it nears the window),
+stall recovery, and a swappable agent behind the `ChatAgent` protocol. It is a preset over
+[`AgentLoop`](../ComposablePipelines/AgentLoop.swift) with the coding prompt; it lives in the
 `CodingAgent/` target and powers the `cp-agent` executable.
 
 ```swift
-While(reply.isEmpty && turns < maxTurns) {
-    // Near the context window? Summarize the older transcript instead of dropping it; else take a turn.
-    if compaction && transcript.count > compactionTrigger {
-        CompactTranscript(summary: $compactionSummary, transcript: $transcript, /* head/middle/tail */)
-    } else {
-        // `systemPrompt` is a computed property over `let`s (no @State read), so `.assign` is safe.
-        Model<ModelTurn>(systemPrompt)
-            .tools(tools.map(\.descriptor))
-            .input { $transcript }                            // no maxTokens → server default
-            .assign(to: $lastTurn)
-        Run($lastTurn) { turn in /* run tool calls, append results */ }.assign(to: $transcript)
-        $lastTurn.map { $0.toolCalls?.isEmpty == false ? "" : ($0.reply ?? "") }.assign(to: $reply)
-        $turns.map { $0 + 1 }.assign(to: $turns)
-    }
-}
-$reply
+// Built once (a stored property or the root pipeline), never inside a `body`, and one value per run.
+let agent = AgentLoop(task: task, tools: defaultCodingTools(jail: jail),
+                      systemPrompt: CodingAgentPipeline.defaultSystemPrompt,
+                      maxTurns: 30, workingDirectory: jail.root)
+    .finishTool()                 // a `finish` call ends the run with its message
+    .probe(watching: jail.root)   // warn off a fixed point; warned again later → answer now
+    .answerOnLastTurn()           // the budget's last turn is a tool-free answer
 ```
 
 See the [README worked example](../README.md#worked-example-a-coding-agent-as-a-pipeline) for the

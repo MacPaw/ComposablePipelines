@@ -5,7 +5,7 @@ between them is a plain value you can serialize.
 
 ```
 @PipelineBuilder        PipelineCompiler         PipelineWalker          Executor
-Swift DSL code          .compile(_:)             .run(_:)                runModel / runGuardrail
+Swift DSL code          .compile(_:)             .run(_:)                runModel
      │                       │                        │                       │
      ▼                       ▼                        ▼                       ▼
 PipelineGraph ─────▶ PipelineExecutionGraph ──▶ walk + epoch ───────▶ host-supplied execution

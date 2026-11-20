@@ -2,7 +2,7 @@
 //  PipelineCompilerTests.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -369,7 +369,7 @@ final class PipelineCompilerTests: XCTestCase {
         }
     }
 
-    // MARK: - Guardrail default gated behavior
+    // MARK: - Explicit gate
 
     func testExplicitGate_producesGroupWithGate() {
         let ast: PipelineGraph = .sequence([
@@ -384,7 +384,7 @@ final class PipelineCompilerTests: XCTestCase {
             return XCTFail("Expected .sequential, got \(result)")
         }
 
-        XCTAssertEqual(levels.count, 2, "Guardrail gate → then parallel writes")
+        XCTAssertEqual(levels.count, 2, "gate → then parallel writes")
 
         guard case let .parallel(parallelTasks) = levels[1] else {
             return XCTFail("Expected .parallel at level 1 after gate, got \(levels[1])")
@@ -471,5 +471,48 @@ final class PipelineCompilerTests: XCTestCase {
             let avgMs = (best / Double(iterations)) * 1_000
             print("  compile \(size) slots × \(iterations): best-of-3 avg \(String(format: "%.3f", avgMs))ms")
         }
+    }
+
+
+    // MARK: - Classification leaf
+
+    func testClassifyLeaf_compilesWithItsTextSubgraph() {
+        let text: PipelineGraph = .leaf(.just(valueTypeName: "String", jsonUTF8: "\"hello\""))
+        let pin = ModelSpecDescriptor(sourceID: "acme/pii")
+        let result = compiler.compile(.leaf(.classify(text: text, task: .token, spec: pin)))
+
+        guard case let .task(task) = result,
+              case let .classify(compiledText, compiledTask, compiledSpec) = task.operation else {
+            return XCTFail("Expected a single classify task, got \(result)")
+        }
+        XCTAssertEqual(compiledTask, .token)
+        XCTAssertEqual(compiledSpec, pin)
+        guard case let .task(inner) = compiledText, case .constant = inner.operation else {
+            return XCTFail("Expected the text subgraph compiled in place, got \(compiledText)")
+        }
+    }
+
+    func testClassifyReadsItsTextSlotAfterTheWrite() {
+        // `Classify(using:) { $draft.get() }` must run after the step that writes `$draft`, and never in
+        // parallel with it: the text subgraph's read is what orders it.
+        let classify = stateSet(slotB, value: .leaf(.classify(text: stateGet(slotA), task: .token, spec: nil)))
+        let ast: PipelineGraph = .sequence([
+            stateSet(slotA, value: opaqueLeaf("Draft")),
+            classify,
+        ])
+        guard case let .sequential(levels) = compiler.compile(ast) else {
+            return XCTFail("Expected a sequential graph")
+        }
+        XCTAssertEqual(levels.count, 2, "the write, then the classify that reads it")
+    }
+
+    func testClassifySurfaceKeyCarriesTheTaskKind() {
+        // A re-lowering that swaps a span task for a sequence task must not be mistaken for the same
+        // surface task, or the prefix skip would replay the wrong result.
+        let text = compiler.compile(.leaf(.just(valueTypeName: "String", jsonUTF8: "\"x\"")))
+        let tokens = PipelineExecutionGraph.surfaceKey(for: .classify(text: text, task: .token, spec: nil))
+        let sequence = PipelineExecutionGraph.surfaceKey(for: .classify(text: text, task: .zeroShotSequence(labels: ["a"]), spec: nil))
+        XCTAssertNotEqual(tokens, sequence)
+        XCTAssertTrue(tokens.hasPrefix("classify:"), tokens)
     }
 }

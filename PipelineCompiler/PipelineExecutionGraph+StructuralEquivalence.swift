@@ -2,7 +2,7 @@
 //  PipelineExecutionGraph+StructuralEquivalence.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -12,7 +12,7 @@ extension PipelineExecutionGraph.Operation {
     /// Discriminator for re-exec suffix drift checks (ignores payloads such as constant JSON).
     public var structuralShapeTag: String {
         switch self {
-        case .router: return "router"
+        case .classify: return "classify"
         case .dagPlan: return "dagPlan"
         case .relevanceRank: return "relevanceRank"
         case .model: return "model"
@@ -25,6 +25,7 @@ extension PipelineExecutionGraph.Operation {
         case .contextProvide: return "contextProvide"
         case .memoryQuery: return "memoryQuery"
         case .memoryStore: return "memoryStore"
+        case .delegate: return "delegate"
         case .constant: return "constant"
         }
     }
@@ -52,6 +53,11 @@ extension PipelineExecutionGraph {
             out.append(task.operation)
         case .loopScope(let inner):
             inner.appendFlattened(into: &out)
+        case let .branch(_, then, otherwise):
+            then.appendFlattened(into: &out)
+            otherwise.appendFlattened(into: &out)
+        case let .whileLoop(_, body):
+            body.appendFlattened(into: &out)
         }
     }
 

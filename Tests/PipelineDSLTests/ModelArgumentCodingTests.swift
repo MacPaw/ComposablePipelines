@@ -2,7 +2,7 @@
 //  ModelArgumentCodingTests.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -23,7 +23,7 @@ final class ModelArgumentCodingTests: XCTestCase {
 
     func testCustomWithArrayJSONValueRoundTrips() throws {
         let original = ModelArgument.custom(
-            key: "guardrailRules",
+            key: "labels",
             value: .array([.string("illegal"), .string("harmful")])
         )
         let decoded = try roundTrip(original)

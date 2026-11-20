@@ -2,7 +2,7 @@
 //  PipelineGraphTestHelpers.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -45,6 +45,15 @@ enum PipelineGraphTestHelpers {
         case let .loop(content):
             var lines = ["\(prefix)loop"]
             lines.append(contentsOf: prettyLines(content, prefix: prefix + "  "))
+            return lines
+        case let .branch(_, then, otherwise):
+            var lines = ["\(prefix)branch"]
+            lines.append(contentsOf: prettyLines(then, prefix: prefix + "  then "))
+            lines.append(contentsOf: prettyLines(otherwise, prefix: prefix + "  else "))
+            return lines
+        case let .whileLoop(_, body):
+            var lines = ["\(prefix)whileLoop"]
+            lines.append(contentsOf: prettyLines(body, prefix: prefix + "  "))
             return lines
         case let .leaf(leaf):
             if case let .executionStateSet(id, valueTypeName, value, _, _) = leaf {
@@ -99,12 +108,14 @@ enum PipelineGraphTestHelpers {
             return "leaf memoryQuery(quality: \(quality.rawValue))"
         case .memoryStore:
             return "leaf memoryStore"
-        case .router:
-            return "leaf router"
+        case let .classify(_, task, _):
+            return "leaf classify(\(task))"
         case .dagPlan:
             return "leaf dagPlan"
         case .relevanceRank:
             return "leaf relevanceRank"
+        case let .delegate(_, tasksSlotID, _, budgetTotal, leafReserve, _):
+            return "leaf delegate(tasks: \(tasksSlotID.uuidString), budget: \(budgetTotal)/\(leafReserve))"
         }
     }
 

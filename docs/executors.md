@@ -2,7 +2,7 @@
 
 The **walker orchestrates; the executor executes.** `PipelineWalker` follows the compiled
 graph — ordering, parallel batching, state, incremental re-execution — and for every
-model/guardrail step it calls out to an `Executor` you provide. That seam is where you plug in
+model step it calls out to an `Executor` you provide. That seam is where you plug in
 your runtime: a local model, a hosted API, a remote service, anything.
 
 - [The protocol](#the-protocol)
@@ -26,16 +26,16 @@ public protocol Executor: Sendable {
         outputTypeName: String,
         requirements: ModelSelectionRequirements?
     ) async throws -> ExecutionValue
-
-    func runGuardrail(rules: [GuardrailRule]) async throws -> ExecutionValue
 }
 ```
 
 - `runModel` receives the already-resolved instructions, tools, and input for one `Model`
   step. `outputTypeName` is the name of the step's declared `Output` (e.g. `"String"`);
   `requirements` is the soft model-selection intent. Return the encoded result.
-- `runGuardrail` evaluates the rules for one `Guardrail` step. Return a JSON-encoded `Bool`
-  (`true` == passes / proceed).
+- The other seams have protocol-extension defaults that throw `noBackend`, so a conformer implements
+  only what it serves. `runClassification(text:task:spec:)` receives an encoded `String` and a
+  `ClassificationTask`; return an encoded `LabelScores` for `.sequence`, `LabeledSpans` otherwise,
+  with span offsets in UTF-16 code units of the decoded text.
 
 ---
 
@@ -63,7 +63,7 @@ pipeline uses.
 
 ## A real executor
 
-A minimal executor that calls an async model API and always passes guardrails:
+A minimal executor that calls an async model API:
 
 ```swift
 struct APIExecutor: Executor {
@@ -81,11 +81,6 @@ struct APIExecutor: Executor {
         let answer = try await client.complete(system: system, user: user, model: model)
 
         return try JSONEncoder().encode(answer)
-    }
-
-    func runGuardrail(rules: [GuardrailRule]) async throws -> ExecutionValue {
-        let passes = try await client.checkSafety(rules.map(\.rawValue))
-        return try JSONEncoder().encode(passes)
     }
 }
 
@@ -152,7 +147,7 @@ let result = try await walker.run(graph: graph) { event in
 }
 ```
 
-`StepInfo` carries `taskID`, `operationLabel` (`"model"`, `"guardrail"`, `"stateSet"`, …),
+`StepInfo` carries `taskID`, `operationLabel` (`"model"`, `"stateSet"`, `"clientTask"`, …),
 `prettyLabel` (`"$severity.set"`, `"model → String"`), and `slotID` for state operations.
 
 For run-level telemetry, pass a `PipelineRunObserver` to `PipelineWalker(observer:)`.
@@ -161,9 +156,10 @@ For run-level telemetry, pass a `PipelineRunObserver` to `PipelineWalker(observe
 
 ## Errors and fallbacks
 
-Throw `ExecutorError.noBackend` when no model/guardrail can satisfy a request. The walker
-treats it as a soft miss and applies a fallback (an empty result for a model, pass-through for
-a guardrail) rather than aborting the run — which is exactly how `MockExecutor` behaves. Any
+Throw `ExecutorError.noBackend` when no model can satisfy a request. The walker
+treats it as a soft miss and applies a fallback rather than aborting the run — an empty result for a
+model, `LabelScores.unavailable` / `LabeledSpans.unavailable` for a classification, so a pipeline can
+tell "no encoder" from "nothing found" — which is exactly how `MockExecutor` behaves. Any
 other error you throw propagates: the walker emits `.stepFailed` and the `run` call rethrows.
 
 ---
@@ -175,13 +171,13 @@ Ships with the package so a pipeline runs end to end with no real backend:
 ```swift
 public struct MockExecutor: Executor {
     public init()
-    // runModel / runGuardrail throw ExecutorError.noBackend → walker applies fallbacks
+    // runModel throws ExecutorError.noBackend → walker applies fallbacks
 }
 ```
 
 ```swift
 let walker = PipelineWalker(executor: MockExecutor())
-let result = try await walker.run(graph: graph)   // model steps return "", guardrails pass
+let result = try await walker.run(graph: graph)   // model steps return ""
 ```
 
 Use it to exercise graph shape, ordering, and observation in demos and tests — not for real
