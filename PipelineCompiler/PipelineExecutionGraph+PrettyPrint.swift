@@ -2,7 +2,7 @@
 //  PipelineExecutionGraph+PrettyPrint.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -70,6 +70,18 @@ private enum Printer {
             var lines = ["\(p)── loop (reactive) \(String(repeating: "─", count: max(0, dividerWidth - "\(p)── loop (reactive) ".count)))"]
             lines.append(contentsOf: emit(body, indent: indent + 1))
             return lines
+
+        case let .branch(conditionSlotID, then, otherwise):
+            var lines = ["\(p)── if $\(conditionSlotID.uuidString.prefix(8)) (in-graph)"]
+            lines.append(contentsOf: emit(then, indent: indent + 1))
+            lines.append("\(p)── else")
+            lines.append(contentsOf: emit(otherwise, indent: indent + 1))
+            return lines
+
+        case let .whileLoop(conditionSlotID, body):
+            var lines = ["\(p)── while $\(conditionSlotID.uuidString.prefix(8)) (in-graph)"]
+            lines.append(contentsOf: emit(body, indent: indent + 1))
+            return lines
         }
     }
 
@@ -101,13 +113,14 @@ private enum Printer {
         let shortID = task.id.uuidString.prefix(8).description
 
         switch task.operation {
-        case let .router(query, _):
-            let queryExpr = inlineExpr(query)
-            if let queryExpr {
-                return ["\(pad)[\(shortID)] router(query: \(queryExpr))"]
+        case let .classify(text, task, spec):
+            let pin = spec?.pinDescription.map { ", spec: \($0)" } ?? ""
+            let textExpr = inlineExpr(text)
+            if let textExpr {
+                return ["\(pad)[\(shortID)] classify(\(task)\(pin), text: \(textExpr))"]
             }
-            var lines = ["\(pad)[\(shortID)] router {"]
-            lines.append(contentsOf: emit(query, indent: indent + 1))
+            var lines = ["\(pad)[\(shortID)] classify(\(task)\(pin)) {"]
+            lines.append(contentsOf: emit(text, indent: indent + 1))
             lines.append("\(pad)}")
             return lines
 
@@ -121,12 +134,12 @@ private enum Printer {
             lines.append("\(pad)}")
             return lines
 
-        case let .relevanceRank(query, tools, threshold, topK):
+        case let .relevanceRank(query, tools, topK):
             let queryExpr = inlineExpr(query)
             if let queryExpr {
-                return ["\(pad)[\(shortID)] relevanceRank(tools: \(tools.count), threshold: \(threshold), topK: \(topK), query: \(queryExpr))"]
+                return ["\(pad)[\(shortID)] relevanceRank(tools: \(tools.count), topK: \(topK), query: \(queryExpr))"]
             }
-            var lines = ["\(pad)[\(shortID)] relevanceRank(tools: \(tools.count), threshold: \(threshold), topK: \(topK)) {"]
+            var lines = ["\(pad)[\(shortID)] relevanceRank(tools: \(tools.count), topK: \(topK)) {"]
             lines.append(contentsOf: emit(query, indent: indent + 1))
             lines.append("\(pad)}")
             return lines
@@ -134,12 +147,12 @@ private enum Printer {
         case let .model(config, arguments):
             let keys = arguments.keys.sorted().joined(separator: ", ")
             let traitsSuffix = traitsExpr(config.traits)
-            return ["\(pad)[\(shortID)] model(output: \(config.outputTypeName), traits: \(traitsSuffix), args: [\(keys)])"]
+            return ["\(pad)[\(shortID)] model(output: \(config.outputTypeName), traits: \(traitsSuffix), args: [\(keys)])\(allowlistSuffix(config))"]
 
         case let .modelInput(config, arguments, input):
             let keys = arguments.keys.sorted().joined(separator: ", ")
             let traitsSuffix = traitsExpr(config.traits)
-            var lines = ["\(pad)[\(shortID)] model(output: \(config.outputTypeName), traits: \(traitsSuffix), args: [\(keys)]) {"]
+            var lines = ["\(pad)[\(shortID)] model(output: \(config.outputTypeName), traits: \(traitsSuffix), args: [\(keys)])\(allowlistSuffix(config)) {"]
             lines.append(contentsOf: emit(input, indent: indent + 1))
             lines.append("\(pad)}")
             return lines
@@ -220,6 +233,18 @@ private enum Printer {
                 ? String(jsonUTF8.prefix(37)) + "..."
                 : jsonUTF8
             return ["\(pad)[\(shortID)] \(valueTypeName)(\(truncated))"]
+
+        case let .delegate(child, tasksSlotID, _, budgetTotal, leafReserve, inherit):
+            let header = "\(pad)[\(shortID)] delegate(tasks: \(tasksSlotID.shortID), budget: \(budgetTotal)/\(leafReserve), inherit: \(inherit.rawValue))"
+            switch child {
+            case let .embedded(childGraph):
+                var lines = ["\(header) {"]
+                lines.append(contentsOf: emit(childGraph, indent: indent + 1))
+                lines.append("\(pad)}")
+                return lines
+            case .selfRecursion:
+                return ["\(header) { self }"]
+            }
         }
     }
 
@@ -245,15 +270,16 @@ private enum Printer {
                 ? String(jsonUTF8.prefix(27)) + "..."
                 : jsonUTF8
             return "\(valueTypeName)(\(truncated))"
-        case let .router(query, _):
-            guard let queryExpr = inlineExpr(query) else { return nil }
-            return "router(\(queryExpr))"
+        case let .classify(text, task, spec):
+            guard let textExpr = inlineExpr(text) else { return nil }
+            let pin = spec?.pinDescription.map { ", spec: \($0)" } ?? ""
+            return "classify(\(task)\(pin), text: \(textExpr))"
         case let .dagPlan(query, tools, hints):
             guard let queryExpr = inlineExpr(query) else { return nil }
             return "dagPlan(tools: \(tools.count), hints: \(hints.count), query: \(queryExpr))"
-        case let .relevanceRank(query, tools, threshold, topK):
+        case let .relevanceRank(query, tools, topK):
             guard let queryExpr = inlineExpr(query) else { return nil }
-            return "relevanceRank(tools: \(tools.count), threshold: \(threshold), topK: \(topK), query: \(queryExpr))"
+            return "relevanceRank(tools: \(tools.count), topK: \(topK), query: \(queryExpr))"
         default:
             return nil
         }
@@ -265,6 +291,17 @@ private enum Printer {
     static func stateSlotTag(slotID: UUID, debugLabel: String?) -> String {
         if let debugLabel, !debugLabel.isEmpty { return "$\(debugLabel)" }
         return "[\(slotID.shortID)]"
+    }
+
+    /// ` narrowedBy: [slot]` when the step's tool catalog is narrowed at runtime, else empty.
+    ///
+    /// Worth surfacing even though the other slot-backed fields are not printed: an allowlist changes
+    /// *which tools the model was shown*, so a printed graph that omitted it would misreport the step.
+    ///
+    /// - Author: Claude
+    static func allowlistSuffix(_ config: ModelConfig) -> String {
+        guard let slotID = config.toolAllowlistSlotID else { return "" }
+        return " narrowedBy: [\(slotID.shortID)]"
     }
 
     static func traitsExpr(_ traits: ModelSelectionTraits) -> String {

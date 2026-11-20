@@ -2,7 +2,7 @@
 //  SugarConstructionTests.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -157,14 +157,6 @@ final class SugarConstructionTests: XCTestCase {
         let sugar = Group { Just(value: 1) }.gated().loweredGraph()
         let verbose = Group(gate: true) { Just(value: 1) }.loweredGraph()
         XCTAssertEqual(sugar, verbose, PipelineGraphTestHelpers.prettyPrint(sugar))
-    }
-
-    // MARK: - Guardrail variadic
-
-    func testGuardrailClassification_variadicRules_equalsArrayForm() {
-        let variadic = GuardrailClassification(.politics, .pii) { Just(value: "hi") }.loweredGraph()
-        let array = GuardrailClassification(rules: [.politics, .pii]) { Just(value: "hi") }.loweredGraph()
-        XCTAssertEqual(variadic, array, PipelineGraphTestHelpers.prettyPrint(variadic))
     }
 
     // MARK: - assign(to:) dependency-capture contract

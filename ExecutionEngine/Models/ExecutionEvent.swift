@@ -2,7 +2,7 @@
 //  ExecutionEvent.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -41,7 +41,42 @@ public enum ExecutionEvent: Sendable {
     /// The top-level `run(...)` call completed successfully.
     case executionCompleted
     /// Incremental model output text produced during a `.model` step (token streaming).
-    case modelOutputDelta(taskID: UUID, text: String)
+    ///
+    /// `delegatePath` is the emitting walker's ``DelegateRunID`` path from the delegate root, empty at the
+    /// top. Without it a subagent's tokens are unattributable: siblings run concurrently, so their deltas
+    /// interleave, and `taskID` identifies the step rather than who ran it.
+    case modelOutputDelta(taskID: UUID, text: String, delegatePath: [Int])
+    /// A subagent of a `.delegate` operation changed state. Primitive fields so the engine stays free of
+    /// delegate observation types; the client folds these into a per-epoch snapshot.
+    ///
+    /// - Note: Adding a case to this public enum is **source-breaking** for any exhaustive `switch` over
+    ///   `ExecutionEvent` in a client. The payload is deliberately primitive (no `Codable`, no delegate
+    ///   observation types) so it never crosses the IPC boundary — `ElixRuntime` forwards only its
+    ///   scalar fields — but downstream code that switches over the enum must add the new case.
+    case delegateSubagent(DelegateSubagentEvent)
+}
+
+/// One subagent state transition inside a `.delegate` fan-out, emitted by the walker. Fields are
+/// primitive (no delegate observation types) so `ExecutionEngine` needn't depend on `DelegateAgent`; the
+/// client reconstructs a `DelegateSnapshot` by folding these keyed by `path`.
+public struct DelegateSubagentEvent: Sendable, Hashable {
+    /// The subagent's `DelegateRunID` path (child indices from the delegate root).
+    public let path: [Int]
+    /// The subagent's `DelegatePhase` raw value (`running`, `completed`, `refused`, `failed`, …).
+    public let phase: String
+    /// Rough work spent by the subagent so far.
+    public let cost: Int
+    /// The observation **wave** this transition belongs to (not a per-transition tick): `0` = initial
+    /// membership, `1` = the warm-up subagent's terminal, `2` = the flooded remainder's terminals. A
+    /// snapshot fold keyed by epoch therefore sees each wave as one coherent set of siblings.
+    public let epoch: Int
+
+    public init(path: [Int], phase: String, cost: Int, epoch: Int) {
+        self.path = path
+        self.phase = phase
+        self.cost = cost
+        self.epoch = epoch
+    }
 }
 
 public struct ExecutionProgressUpdate: Sendable {
@@ -55,11 +90,11 @@ public struct ExecutionProgressUpdate: Sendable {
 /// Label of a single task node, attached to step lifecycle events.
 public struct StepInfo: Sendable {
     public let taskID: UUID
-    /// Short canonical operation name — `"stateSet"`, `"model"`, `"guardrail"`, etc.
+    /// Short canonical operation name — `"stateSet"`, `"model"`, `"clientTask"`, etc.
     /// Use for category-level matching (e.g., trace assertions).
     public let operationLabel: String
     /// Human-readable label including slot binding / model output type — `"$severity.set"`,
-    /// `"guardrail([.geopolitics, .illegal])"`, `"model → String"`.
+    /// `"model → String"`, `"clientTask"`.
     public let prettyLabel: String
     /// Slot UUID for `stateGet` / `stateSet` operations; `nil` for everything else.
     /// Lets observers correlate a step with the slot it touched without re-walking

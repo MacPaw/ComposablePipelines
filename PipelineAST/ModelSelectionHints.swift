@@ -2,7 +2,7 @@
 //  ModelSelectionHints.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -54,6 +54,8 @@ public struct ModelSelectionTraits: OptionSet, Codable, Equatable, Sendable, Has
     public static let entityExtraction     = Self(rawValue: 1 << 14)
     /// Normalize extracted entities into structured memory facts.
     public static let memoryNormalization  = Self(rawValue: 1 << 15)
-    /// Content-safety guardrail classification.
-    public static let guardrailClassification = Self(rawValue: 1 << 16)
+    // Bits 16 and 17 are retired and must not be reused: a payload from an older peer may still carry
+    // them, and a new meaning would silently repoint it. Bit 16 was `guardrailClassification` (removed
+    // in IPC v18); bit 17 was `promptClassification` (removed in IPC v18 — encoder tasks are selected by
+    // `ClassificationTask.Kind` and an optional checkpoint pin, not by trait).
 }

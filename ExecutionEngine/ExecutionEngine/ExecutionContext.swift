@@ -2,7 +2,7 @@
 //  ExecutionContext.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -20,6 +20,15 @@ public struct ReexecutionGraph: Sendable {
         self.graph = graph
         self.appliedCursor = appliedCursor
     }
+}
+
+/// The externally-supplied capabilities a nested run (e.g. a delegate subagent) inherits from its
+/// parent run: client tools, context providers, and memory. State stays isolated per subagent;
+/// these capabilities are shared, so a subagent can call the same tools and reach the same memory.
+struct InheritedCapabilities: Sendable {
+    let clientActionProvider: (@Sendable (UUID, ExecutionValue) async throws -> ExecutionValue)?
+    let contextProviders: [UUID: any ContextItemsProvider]
+    let memoryProvider: (any MemoryProvider)?
 }
 
 /// Per-request execution state: slot storage, trace, event reporting, epoch-tagged
@@ -455,6 +464,20 @@ actor ExecutionContext {
     /// actor re-entry from a detached background task.
     func memoryProviderForAsync() -> (any MemoryProvider)? {
         memoryProvider
+    }
+
+    /// The capabilities a nested run inherits from this one, filtered by an explicit ``mask``. A delegate
+    /// subagent runs in an isolated *state* scope; this decides which of the parent's *shared*
+    /// capabilities it may reach. A capability the mask omits is withheld (`nil` provider / empty map),
+    /// so a child cannot call tools, resolve context, or touch memory it was not granted. The default
+    /// mask (``DelegateInheritance/isolated``) withholds all three. Read once and forward into the child
+    /// ``PipelineWalker/run(...)``.
+    func inheritedCapabilities(_ mask: DelegateInheritance) -> InheritedCapabilities {
+        InheritedCapabilities(
+            clientActionProvider: mask.contains(.tools) ? clientActionProvider : nil,
+            contextProviders: mask.contains(.context) ? contextProviders : [:],
+            memoryProvider: mask.contains(.memory) ? memoryProvider : nil
+        )
     }
 
     func requireMemoryProviderForStore() throws {

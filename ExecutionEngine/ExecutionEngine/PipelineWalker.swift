@@ -2,7 +2,7 @@
 //  PipelineWalker.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -108,9 +108,15 @@ public final class PipelineWalker {
         initialSlots: [UUID: ExecutionValue] = [:],
         onCommittedBatch: (@Sendable ([StateUpdate]) -> Void)? = nil,
         graphProvider: (@Sendable (ExecutionCursor) -> ReexecutionGraph?)? = nil,
-        observingExecution eventObserver: (@Sendable (ExecutionEvent) -> Void)? = nil
+        observingExecution eventObserver: (@Sendable (ExecutionEvent) -> Void)? = nil,
+        traceID: UUID? = nil,
+        sharedDelegateBudget: SpawnBudget? = nil,
+        delegatePathPrefix: [Int] = []
     ) async throws -> ExecutionValue {
-        let runID = UUID()
+        // The run id doubles as the OTLP trace id. A caller may supply one so the
+        // emitted spans correlate to an external record (e.g. an eval case execution);
+        // otherwise each run gets a fresh id.
+        let runID = traceID ?? UUID()
         await runRegistry.begin(runID)
         let registry = self.runRegistry
         defer { Task { await registry.end(runID) } }
@@ -133,7 +139,9 @@ public final class PipelineWalker {
                             initialSlots: initialSlots,
                             onCommittedBatch: onCommittedBatch,
                             graphProvider: graphProvider,
-                            eventObserver: eventObserver
+                            eventObserver: eventObserver,
+                            sharedDelegateBudget: sharedDelegateBudget,
+                            delegatePathPrefix: delegatePathPrefix
                         )
                     }
                 }
@@ -155,7 +163,9 @@ public final class PipelineWalker {
         initialSlots: [UUID: ExecutionValue],
         onCommittedBatch: (@Sendable ([StateUpdate]) -> Void)?,
         graphProvider: (@Sendable (ExecutionCursor) -> ReexecutionGraph?)?,
-        eventObserver: (@Sendable (ExecutionEvent) -> Void)?
+        eventObserver: (@Sendable (ExecutionEvent) -> Void)?,
+        sharedDelegateBudget: SpawnBudget?,
+        delegatePathPrefix: [Int]
     ) async throws -> ExecutionValue {
         let context = ExecutionContext(
             initialSlots: initialSlots,
@@ -166,7 +176,33 @@ public final class PipelineWalker {
             contextProviders: contextProviders,
             memoryProvider: memoryProvider
         )
-        let walker = GraphWalker(executor: executor, context: context, logger: logger)
+
+        // Self-delegate capability (Variant 2): capture the **root** graph here — where it is a plain
+        // local — and re-run it per subagent, so the walker never holds the graph as state. Each delegate
+        // runs the same root one level deeper, seeded with its subtask, sharing the self-tree's budget.
+        // Building it always is cheap; it fires only if a `.selfRecursion` leaf is reached.
+        let rootGraph = graph
+        let sharedExecutor = executor
+        let selfDelegate: SelfDelegateRunner = { seed, taskInputSlotID, capabilities, budget, pathPrefix, observer in
+            try await PipelineWalker(executor: sharedExecutor).run(
+                graph: rootGraph,
+                clientActionProvider: capabilities.clientActionProvider,
+                contextProviders: capabilities.contextProviders,
+                memoryProvider: capabilities.memoryProvider,
+                initialSlots: [taskInputSlotID: seed],
+                observingExecution: observer,
+                sharedDelegateBudget: budget,
+                delegatePathPrefix: pathPrefix
+            )
+        }
+        let walker = GraphWalker(
+            executor: executor,
+            context: context,
+            logger: logger,
+            selfDelegate: selfDelegate,
+            selfDelegateBudget: sharedDelegateBudget,
+            delegatePathPrefix: delegatePathPrefix
+        )
 
         logger.log(.verbose, "execution started")
         let timer = ElapsedTimer()

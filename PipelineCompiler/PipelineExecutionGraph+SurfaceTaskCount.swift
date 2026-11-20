@@ -2,7 +2,7 @@
 //  PipelineExecutionGraph+SurfaceTaskCount.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -25,6 +25,9 @@ extension PipelineExecutionGraph {
         case .loopScope:
             // A reactive loop body lives outside the prefix-skip ordinal space — its tasks re-run
             // each pass, so they must never be counted toward (or trimmed by) the surface cursor.
+            return 0
+        case .branch, .whileLoop:
+            // Slot-driven, evaluated in-graph — self-contained, outside the surface ordinal space.
             return 0
         }
     }

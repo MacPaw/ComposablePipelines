@@ -2,7 +2,7 @@
 //  GraphEmissionContext.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -31,7 +31,6 @@ final class GraphEmissionContext: @unchecked Sendable {
     private var stableIDSequence: UInt64 = 0
     private(set) var clientActions: [UUID: PipelineClientAction] = [:]
     private(set) var contextProviders: [UUID: any ContextItemsProvider] = [:]
-    private(set) var toolRegistry = ToolRegistry()
 
     init(stableIDSequence: UInt64 = 0) {
         self.stableIDSequence = stableIDSequence
@@ -59,17 +58,6 @@ final class GraphEmissionContext: @unchecked Sendable {
 
     func recordContextProvider(_ id: UUID, provider: any ContextItemsProvider) {
         contextProviders[id] = provider
-    }
-
-    /// Registers only locally-callable tools (``ToolExecutor`` conformers).
-    /// ``AgentTool`` values are skipped — their descriptors reach the graph via the model node,
-    /// but they have no local implementation to register.
-    func registerTools(_ tools: [any PipelineTool]) {
-        for tool in tools {
-            if let executor = tool as? any ToolExecutor {
-                toolRegistry.register(executor)
-            }
-        }
     }
 
     /// Drain ALL pending reads (used by `buildEither`/`buildOptional` for control-flow gates).

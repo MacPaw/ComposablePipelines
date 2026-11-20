@@ -4,7 +4,7 @@
 // a SwiftUI-like DSL, a Codable AST, a compiler, and an observable walker. Execution
 // plugs in through the `Executor` seam.
 //
-// Copyright © 2026 MacPaw Way Ltd. Licensed under the Apache License, Version 2.0 (see LICENSE).
+// Copyright © 2026 MacPaw Inc. Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import CompilerPluginSupport
 import PackageDescription
@@ -23,6 +23,14 @@ let package = Package(
         // Runnable reference pipelines — read them, copy them, learn the DSL. Built (and
         // execution-tested) as part of the package so they never drift from the API.
         .library(name: "Examples", targets: ["Examples"]),
+
+        // The real coding-agent pipeline + its file/bash tools, so out-of-package
+        // hosts (e.g. the eval runner) can run it.
+        .library(name: "CodingAgent", targets: ["CodingAgent"]),
+
+        // Delegate-of-subagents authoring + dispatch (budget, runner). Vended so the proprietary
+        // agent runtime can resolve the delegate's shared model against its ResourceExecutor.
+        .library(name: "DelegateAgent", targets: ["DelegateAgent"]),
     ],
     dependencies: [
         .package(url: "https://github.com/swiftlang/swift-syntax", from: "600.0.0"),
@@ -97,7 +105,7 @@ let package = Package(
         // opencode-"Build"-style coding agent: confined tools + a tool-calling agent loop.
         .target(
             name: "CodingAgent",
-            dependencies: ["ComposablePipelines"],
+            dependencies: ["ComposablePipelines", "ExecutionEngine"],
             path: "CodingAgent"
         ),
 
@@ -106,6 +114,14 @@ let package = Package(
             name: "cp-agent",
             dependencies: ["CodingAgent", "OpenAIExecutor", "ComposablePipelines"],
             path: "CodingAgentDemo"
+        ),
+
+        // Delegate-of-subagents: breadth-first recursive dispatch built by reusing the DSL primitives.
+        // Authoring-only — the agent-side runtime resolves the shared model resource.
+        .target(
+            name: "DelegateAgent",
+            dependencies: ["ComposablePipelines"],
+            path: "DelegateAgent"
         ),
 
         // MARK: - Tests
@@ -121,7 +137,7 @@ let package = Package(
         ),
         .testTarget(
             name: "ExecutionEngineTests",
-            dependencies: ["ExecutionEngine", "PipelineCompiler", "PipelineDSL", "PipelineAST", "Examples"],
+            dependencies: ["ExecutionEngine", "PipelineCompiler", "PipelineDSL", "PipelineAST", "Examples", "ComposablePipelines"],
             path: "Tests/ExecutionEngineTests"
         ),
         .testTarget(
@@ -133,6 +149,11 @@ let package = Package(
             name: "CodingAgentTests",
             dependencies: ["CodingAgent", "ComposablePipelines", "ExecutionEngine", "PipelineAST"],
             path: "Tests/CodingAgentTests"
+        ),
+        .testTarget(
+            name: "DelegateAgentTests",
+            dependencies: ["DelegateAgent", "ComposablePipelines", "ExecutionEngine", "PipelineCompiler", "PipelineDSL", "PipelineAST"],
+            path: "Tests/DelegateAgentTests"
         ),
     ]
 )

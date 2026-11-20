@@ -2,7 +2,7 @@
 //  ResearchBriefPipelineTests.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -13,7 +13,7 @@ import PipelineAST
 @testable import ExecutionEngine
 
 /// End-to-end execution of ``ResearchBriefPipeline`` — the Tier-1 sugar showcase. Confirms the
-/// composed graph (Barrier + GateGuardrail, unlabeled ForEach, InstructionsBuilder Model,
+/// composed graph (unlabeled ForEach, InstructionsBuilder Model,
 /// autoclosure While over structured `generating:` output, `map`, and a bare-binding return)
 /// lowers, compiles, and walks to completion end to end.
 final class ResearchBriefPipelineTests: XCTestCase {
@@ -43,20 +43,5 @@ final class ResearchBriefPipelineTests: XCTestCase {
 
         let output = try JSONDecoder().decode(String.self, from: result)
         XCTAssertTrue(output.hasPrefix("BRIEF:"), "expected the drafted brief as output, got: \(output)")
-    }
-
-    func testBlockedInput_shortCircuitsAtGate() async throws {
-        let pipeline = ResearchBriefPipeline(
-            question: "banned content",
-            tone: "concise",
-            chunks: ["irrelevant"]
-        )
-        // GateGuardrail lowers to a Bool-output classification; deny it.
-        let blocking = ScriptedExecutor(guardrailPasses: false) { call in
-            try JSONEncoder().encode("BRIEF: \(call.input.prefix(20))")
-        }
-
-        // The run completes without trapping; the gate simply doesn't clear the barrier.
-        _ = try await PipelineRun.runReactive(pipeline, executor: blocking)
     }
 }
