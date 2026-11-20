@@ -2,7 +2,7 @@
 //  Pipeline.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -70,8 +70,7 @@ extension Pipeline {
         return LoweredPipeline(
             graph: graph,
             clientActions: context.clientActions,
-            contextProviders: context.contextProviders,
-            toolRegistry: context.toolRegistry
+            contextProviders: context.contextProviders
         )
     }
 
@@ -118,17 +117,14 @@ public struct LoweredPipeline {
     public let graph: PipelineGraph
     public let clientActions: [UUID: @Sendable (Data) async throws -> Data]
     public let contextProviders: [UUID: any ContextItemsProvider]
-    public let toolRegistry: ToolRegistry
 
     public init(
         graph: PipelineGraph,
         clientActions: [UUID: @Sendable (Data) async throws -> Data],
-        contextProviders: [UUID: any ContextItemsProvider],
-        toolRegistry: ToolRegistry = ToolRegistry()
+        contextProviders: [UUID: any ContextItemsProvider]
     ) {
         self.graph = graph
         self.clientActions = clientActions
         self.contextProviders = contextProviders
-        self.toolRegistry = toolRegistry
     }
 }

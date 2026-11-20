@@ -2,7 +2,7 @@
 //  PipelineRun.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -24,7 +24,7 @@ import PipelineCompiler
 ///   `if`/`switch` that branch on model output.
 ///
 /// `Run` (client task) closures are captured at lowering and run as written; only
-/// `Model`/`Guardrail` steps consult the scripted executor.
+/// `Model` steps consult the scripted executor.
 enum PipelineRun {
 
     typealias Trace = (result: ExecutionValue, events: [ExecutionEvent])
@@ -35,6 +35,7 @@ enum PipelineRun {
         _ pipeline: P,
         executor: any Executor,
         initialSlots: [UUID: ExecutionValue] = [:],
+        memoryProvider: (any MemoryProvider)? = nil,
         optimizations: PipelineCompiler.Optimizations = [.parallelize]
     ) async throws -> Trace {
         let lowered = pipeline.lowered()
@@ -46,6 +47,7 @@ enum PipelineRun {
             graph: graph,
             clientActionProvider: PipelineWalker.clientActionProvider(from: lowered.clientActions),
             contextProviders: lowered.contextProviders,
+            memoryProvider: memoryProvider,
             initialSlots: initialSlots,
             observingExecution: { sink.append($0) }
         )
@@ -59,6 +61,7 @@ enum PipelineRun {
         executor: any Executor,
         initialSlots: [UUID: ExecutionValue] = [:],
         clientActionResolver: (@Sendable (UUID, ExecutionValue) async throws -> ExecutionValue)? = nil,
+        memoryProvider: (any MemoryProvider)? = nil,
         maxReexecutionDepth: Int = 200,
         optimizations: PipelineCompiler.Optimizations = [.parallelize]
     ) async throws -> Trace {
@@ -94,6 +97,7 @@ enum PipelineRun {
                 if let resolver = clientActionResolver { return try await resolver(id, input) }
                 throw ExecutionError.missingClientAction(taskID: id)
             },
+            memoryProvider: memoryProvider,
             initialSlots: initialSlots,
             onCommittedBatch: { batch in
                 let commits = batch.filter { $0.kind == .commit }
@@ -171,7 +175,7 @@ enum PipelineRun {
 extension Array where Element == ExecutionEvent {
 
     /// `operationLabel`s of every completed step, in completion order
-    /// (e.g. `["guardrail", "model", "stateSet", …]`).
+    /// (e.g. `["model", "stateSet", …]`).
     func completedOperations() -> [String] {
         compactMap { event in
             if case .stepCompleted(let info, _, _) = event { return info.operationLabel }

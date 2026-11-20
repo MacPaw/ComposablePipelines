@@ -2,7 +2,7 @@
 //  Model+Context.swift
 //  ComposablePipelines
 //
-//  Copyright © 2026 MacPaw Way Ltd. All rights reserved.
+//  Copyright © 2026 MacPaw Inc. All rights reserved.
 //  Licensed under the Apache License, Version 2.0 (see LICENSE).
 //
 
@@ -27,13 +27,8 @@ public struct ModelContextStep<
     }
 
     public var pipelineGraph: PipelineGraph {
-        let config = ModelConfig(
-            outputTypeName: model.config.outputTypeName,
-            traits: model.config.traits,
-            streamingReplySlotID: model.config.streamingReplySlotID,
-            contextItemsSlotIDs: model.config.contextItemsSlotIDs + contexts.map(\.slotID),
-            priorTurnsSlotID: model.config.priorTurnsSlotID
-        )
+        var config = model.config
+        config.contextItemsSlotIDs += contexts.map(\.slotID)
         var items: [PipelineGraph] = contexts.map { (slotID, graph) in
             .leaf(
                 .executionStateSet(

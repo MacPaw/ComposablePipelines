@@ -160,7 +160,7 @@ Each skill activates automatically when you work in a project that uses Composab
 
 ## Run it end to end
 
-The walker delegates each model/guardrail step to your `Executor`:
+The walker delegates each model step to your `Executor`:
 
 ```swift
 import ComposablePipelines
@@ -188,8 +188,8 @@ let result = try await walker.run(graph: graph) { event in
 print(try JSONDecoder().decode(String.self, from: result))
 ```
 
-`MockExecutor` ships so the package runs out of the box — model steps return an empty placeholder
-and guardrails pass, enough to exercise graph shape in demos and tests.
+`MockExecutor` ships so the package runs out of the box — model steps return an empty placeholder,
+enough to exercise graph shape in demos and tests.
 
 ### Against a real model
 
@@ -234,15 +234,33 @@ OPENAI_API_KEY=x OPENAI_BASE_URL=http://localhost:1977/v1 OPENAI_MODEL=your-loca
   swift run cp-agent ./scratch-dir
 ```
 
-Here is the shape of the loop (abridged — the shipped
-[`CodingAgentPipeline`](CodingAgent/CodingAgentPipeline.swift) adds context compaction, stall
-recovery, and window-aware budgeting):
+Here is the shape of the loop (abridged — the shipped [`AgentLoop`](ComposablePipelines/AgentLoop.swift),
+which [`CodingAgentPipeline`](CodingAgent/CodingAgentPipeline.swift) wraps with coding defaults, adds
+context compaction, stall recovery, window-aware budgeting, and [stop policies](ComposablePipelines/StopPolicy.swift)
+declared as modifiers:
+
+```swift
+let loop = AgentLoop(task: task, tools: tools, systemPrompt: prompt, maxTurns: 30)
+    .finishTool()                 // a `finish` call ends the run with its message as the answer
+    .probe(watching: workspace)   // warn the agent off a fixed point; warned again later → answer now
+    .answerOnLastTurn()           // the budget's last turn is a text answer, not a tool call
+```
+
+A run that continues a conversation — a chat follow-up such as "ok so which" — passes the earlier
+turns as `conversation:`. They go ahead of the task on every request, and trimming and compaction
+keep them whole: only what the run adds after the task is summarized.
+
+`finish` exists because small models that are calling tools rarely produce the tool-free turn
+below. Build the loop and apply its modifiers once — as the root pipeline or a stored property set
+in `init`; a loop created or modified inside a `body` traps, since it would get fresh `@State` slots
+every turn — and build a fresh one for each run, since its stop policies remember the run they
+watched):
 
 ```swift
 struct CodingAgentPipeline: Pipeline {
     typealias Output = String
     let task: String
-    let tools: [any ModelTool]
+    let tools: [any ToolExecutor]
 
     @State var transcript: String
     @State var lastTurn = ModelTurn()
@@ -289,9 +307,10 @@ struct CodingAgentPipeline: Pipeline {
 - **Tools are client work, expressed as `Run`.** The model returns a `ModelTurn` carrying
   `toolCalls`; a `Run` step dispatches them through a `ToolRegistry` and folds the results back
   into state. Model steps and client steps compose in the same graph.
-- **Client-side vs. host-side tools.** The file/`bash` tools are `ModelTool`s — locally executed
-  through the registry. The framework also models `AgentTool`s — descriptor-only tools a host
-  runtime executes — so the same pipeline can target a local process or a remote agent.
+- **Tools stay client-side.** The loop takes any `ToolExecutor` — the bundled file/`bash` tools are
+  `ModelTool`s, and a host can pass its own implementations instead (with a system prompt written
+  for them) — locally executed through the registry captured by the `Run` step. The framework itself
+  carries only `ToolDescriptor`s; implementations never enter the graph.
 - **Cross-cutting concerns are sub-pipelines.** When the transcript approaches the model's context
   window, a compaction *sub-pipeline* summarizes the older middle and rewrites state in place —
   composed into the loop, not bolted onto it.
@@ -305,24 +324,47 @@ struct CodingAgentPipeline: Pipeline {
 > are rejected). `bash` is an escape hatch — it runs with the directory as its cwd but is not
 > otherwise sandboxed, so point the agent at a scratch directory and a model you trust.
 
+> **Reusing the pieces.** `AgentLoop`, its stop modifiers, `CompactHistory` and `ConversationHistory`
+> are `public`, so an out-of-package harness can build on the same loop. One such harness — `CodingAgent_lc`, a Swift clone of
+> [little-coder](https://github.com/itayinbarr/little-coder)'s hook-based scaffold — lives in the eval
+> runner (`Sources/EvalRunner`, target `LittleCoderHarness`), not in this package: it's an
+> eval-comparison artifact built on these primitives, kept out of the open DSL package.
+
 ## Documentation
 
 - [Getting started](docs/getting-started.md) — install, your first pipeline, compile + walk.
-- [Primitives](docs/primitives.md) — `Model`, `Guardrail`, `While`, `Group`, `ForEach`,
+- [Primitives](docs/primitives.md) — `Model`, `While`, `Group`, `ForEach`,
   `Summarize`, `Run` (client tasks), `@State`, and native control flow, with examples.
+- [Classification](docs/primitives.md#classification) — `Classify(text, using:)` for label scores and
+  `Detect(text, using:)` for spans over the four generic classifiers, with `PromptRouter`, `PIIDetector`
+  and `PolicyLinter` spelled for their use; `status: .unavailable` when no encoder serves a task.
+- [Routing](docs/primitives.md#routing) — `PromptRouter` (a `ZeroShotSequenceClassifier` spelled for routing),
+  `RelevanceRanker` (embedding-ordered tools) and `DAGPlanner`, and the `threshold` removal. `Router`
+  is gone — use `PromptRouter`, which makes the same choice zero-shot over lanes you write yourself.
 - [Executors](docs/executors.md) — the `Executor` seam in depth: `ExecutionValue` encoding,
   observation, errors and fallbacks.
 - [Architecture](docs/architecture.md) — AST → compiler → walker, epochs and incremental
   re-execution, and the wire-format AST.
 - [Examples](docs/examples.md) — a guided tour of the runnable reference pipelines: sequential flow,
   parallel fan-out, map-reduce (`ForEach`), model-output branching, retrieval (`From`), a
-  self-healing retry loop, and a tool-calling agent loop. (Source in [`Examples/`](Examples/).)
+  self-healing retry loop, a tool-calling agent loop, a delegate-of-subagents fan-out
+  (`DelegateResearchPipeline`, using the `Delegate` block), a **self-cloning** recursive agent
+  (`SelfCloningResearchPipeline`, using `DelegateSelf`), and an **atomically-provisioned** delegate where the
+  parent hands each subagent only its own context slice (`ProvisionedDelegateResearchPipeline`). (Source
+  in [`Examples/`](Examples/).)
+- **Delegate of subagents** — `Delegate` fans a task list out to isolated child runs, bounded by a
+  spawn budget, each returning a distilled answer to the parent. `DelegateSelf` lets an agent delegate
+  itself recursively. `DelegationTool` goes further: the model splits its own work and names the tools
+  and context each subagent gets, narrowed at run time by
+  [`Model.toolAllowlist(_:)`](docs/primitives.md#narrowing-the-tool-list-at-run-time). See
+  `DelegateResearchPipeline`, `SelfCloningResearchPipeline` and `ProvisionedDelegateResearchPipeline`
+  in [`Examples/`](Examples/).
 - [Technical note](https://research.macpaw.com/publications/composable-ai-pipelines) — the design
   and rationale behind Composable AI Pipelines.
 
 ## License
 
-Apache License 2.0 — © MacPaw Way Ltd. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Apache License 2.0 — © MacPaw Inc. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 ## A note on this repository
 
