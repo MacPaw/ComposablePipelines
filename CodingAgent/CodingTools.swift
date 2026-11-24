@@ -218,14 +218,17 @@ public struct ShellResult: Sendable {
 ///   - if the command overruns `timeout`, the whole group is SIGKILLed; and
 ///   - once the shell exits, any lingering group members (detached daemons) are reaped after a
 ///     short grace period so the pipe closes and we return promptly.
+/// `environment` replaces the child's environment; nil inherits this process's.
 #if os(macOS) || os(Linux)
 public func runShell(
-    executable: String, arguments: [String], cwd: URL, timeout: TimeInterval
+    executable: String, arguments: [String], cwd: URL, timeout: TimeInterval,
+    environment: [String: String]? = nil
 ) -> ShellResult {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: executable)
     process.arguments = arguments
     process.currentDirectoryURL = cwd
+    if let environment { process.environment = environment }
     let pipe = Pipe()
     process.standardOutput = pipe
     process.standardError = pipe
@@ -424,7 +427,7 @@ public struct GhTool: ModelTool {
     public struct Input: Codable, Sendable { public let command: String }
     public typealias Output = String
     public static let name = "gh"
-    public static let description = "Query GitHub read-only via the gh CLI. Input: {command} = args after `gh`. Read a file's source with \"api repos/OWNER/REPO/contents/PATH\" (returns raw text). Also: \"search code 'QUERY' --repo OWNER/REPO\", \"repo view OWNER/REPO\", \"pr view N --repo OWNER/REPO\". Use the repo's CURRENT owner (projects get renamed, e.g. it's now fastapi/fastapi). Read-only subcommands only."
+    public static let description = "Query GitHub read-only via the gh CLI. Input: {command} = args after `gh`. Read a file's source with \"api repos/OWNER/REPO/contents/PATH\" (returns raw text). Also: \"search code 'QUERY' --repo OWNER/REPO\", \"repo view OWNER/REPO\", \"pr view N --repo OWNER/REPO\". Use the repo's CURRENT owner (projects get renamed, e.g. it's now fastapi/fastapi). Read-only subcommands only; `api` sends GET to a relative API path."
     public static let inputSchema: JSONSchema = .object(properties: ["command": .string], required: ["command"])
 
     let jail: PathJail
@@ -433,50 +436,21 @@ public struct GhTool: ModelTool {
     public func call(_ input: Input) async throws -> String {
         #if os(macOS) || os(Linux)
         let raw = input.command.trimmingCharacters(in: .whitespaces)
-        // Control characters (newline/CR/tab/…) are a shell-injection vector and never appear in a
-        // legitimate gh command — reject them outright.
+        // Control characters (newline/CR/tab/…) never appear in a legitimate gh command.
         if raw.unicodeScalars.contains(where: { $0.value < 0x20 }) {
             return "error: control characters are not allowed in the gh tool"
         }
-        // We exec gh directly (no shell) below, so metacharacters cannot chain commands; keep the
-        // guard anyway as defense in depth and to reject obviously-hostile input early.
-        if raw.contains(where: { ";&|`<>#".contains($0) }) || raw.contains("$(") {
-            return "error: shell metacharacters are not allowed in the gh tool"
-        }
         // Split into an argv the way a shell would (honoring quotes) so the allow-list is checked
         // against the *parsed* command, not a raw prefix a newline/quote could slip past.
-        guard var tokens = Self.tokenize(raw), let sub = tokens.first?.lowercased() else {
+        guard let tokens = Self.tokenize(raw), !tokens.isEmpty else {
             return "error: could not parse the gh command — check your quoting"
         }
-        // Read-only subcommands only, matched on parsed tokens.
-        let twoWord: Set<String> = ["repo view", "pr view", "pr list", "pr diff",
-                                    "issue view", "issue list", "release view", "release list"]
-        let verb = tokens.count >= 2 ? "\(sub) \(tokens[1].lowercased())" : sub
-        guard sub == "api" || sub == "search" || twoWord.contains(verb) else {
-            return "error: only read-only gh subcommands are allowed (api, search, repo view, pr view|list|diff, issue view|list, release view|list)"
-        }
-        if sub == "api" {
-            // Reject write verbs/flags: gh api defaults to GET, so any explicit method/field is a write.
-            if tokens.contains(where: { token in
-                let l = token.lowercased()
-                return l == "-x" || l == "-f"
-                    || l.hasPrefix("--method") || l.hasPrefix("--field")
-                    || l.hasPrefix("--input") || l.hasPrefix("--silent")
-            }) {
-                return "error: gh api is restricted to read-only GET requests"
-            }
-            // `api .../contents/PATH` returns metadata JSON with the file body base64-encoded —
-            // unreadable to the model. Request the raw media type so a file comes back as source
-            // text (directories still return their JSON listing, unaffected by this header).
-            let hasContents = tokens.contains { $0.contains("/contents/") }
-            let hasAccept = tokens.contains { $0.lowercased().hasPrefix("accept:") }
-            if hasContents && !hasAccept {
-                tokens += ["--header", "Accept: application/vnd.github.raw"]
-            }
-        }
-        // Exec gh DIRECTLY — no `zsh -c`, so there is no word-splitting, no glob expansion (the old
-        // `noglob` hack is unnecessary), and no way for an argument to chain a second command.
-        let r = runShell(executable: "/usr/bin/env", arguments: ["gh"] + tokens, cwd: jail.root, timeout: 60)
+        if let refusal = Self.refusal(tokens) { return refusal }
+        // Exec gh DIRECTLY — no `zsh -c`, so there is no word-splitting, no glob expansion, and no way
+        // for an argument to chain a second command; shell metacharacters are plain text to gh.
+        let r = runShell(executable: "/usr/bin/env", arguments: ["gh"] + Self.arguments(for: tokens),
+                         cwd: jail.root, timeout: 60,
+                         environment: Self.environment(from: ProcessInfo.processInfo.environment))
         let out = clamp(r.output)
         // gh prints nothing on a zero-result search; surface that instead of a bare "exit 0".
         if r.exitCode == 0 && out.isEmpty {
@@ -489,10 +463,201 @@ public struct GhTool: ModelTool {
         #endif
     }
 
+    /// The argv gh runs with for an allowed command. `api .../contents/PATH` returns metadata JSON with the
+    /// file body base64-encoded — unreadable to the model — so unless the model set its own `Accept`
+    /// header (the only header ``refusal(_:)`` allows), the raw media type is asked for and a file comes
+    /// back as source text; a directory still returns its JSON listing. The header goes right after
+    /// `api`, where gh reads it as a flag even when the endpoint follows a `--`.
+    static func arguments(for tokens: [String]) -> [String] {
+        guard tokens.first?.lowercased() == "api", tokens.contains(where: { $0.contains("/contents/") }),
+              !tokens.contains(where: { $0 == "-H" || $0 == "--header" || $0.hasPrefix("--header=") })
+        else { return tokens }
+        var arguments = tokens
+        arguments.insert(contentsOf: ["--header", "Accept: application/vnd.github.raw"], at: 1)
+        return arguments
+    }
+
+    /// The environment gh runs with: only what it needs to find itself, its config and its login
+    /// (`gh auth login` keeps the token in the keyring or gh's config). Nothing else is passed down,
+    /// because `--jq` filters see gh's environment (`env`, `$ENV`): API keys and tokens, `GH_TOKEN`
+    /// included, would come back to the model.
+    static func environment(from environment: [String: String]) -> [String: String] {
+        environment.filter { key, _ in
+            ["PATH", "HOME", "TMPDIR", "GH_CONFIG_DIR"].contains(key) || key.hasPrefix("XDG_")
+        }
+    }
+
+    /// The read-only subcommands besides `api`.
+    static let readSubcommands: Set<String> = [
+        "repo view", "pr view", "pr list", "pr diff", "issue view", "issue list", "release view", "release list",
+        "search code", "search repos", "search issues", "search prs", "search commits",
+    ]
+
+    /// Every flag the `--help` of a ``readSubcommands`` entry lists (gh 2.102.0), except `-w`/`--web`.
+    /// One set for all of them: none of these subcommands has a flag that writes or reads local files,
+    /// so a flag is harmless wherever it appears; gh itself rejects one its subcommand doesn't know.
+    static let readFlags: Set<String> = [
+        "-A", "-a", "-B", "-b", "-c", "-d", "-e", "-H", "-L", "-l", "-m", "-O", "-q", "-R", "-S", "-s", "-t",
+        "--allow-escape-sequences", "--app", "--archived", "--assignee", "--author", "--author-date",
+        "--author-email", "--author-name", "--base", "--branch", "--checks", "--closed", "--color",
+        "--commenter", "--comments", "--committer", "--committer-date", "--committer-email",
+        "--committer-name", "--created", "--draft", "--exclude", "--exclude-drafts",
+        "--exclude-pre-releases", "--extension", "--filename", "--followers", "--forks",
+        "--good-first-issues", "--hash", "--head", "--help", "--help-wanted-issues", "--include-forks",
+        "--include-prs", "--interactions", "--involves", "--jq", "--json", "--label", "--language",
+        "--license", "--limit", "--locked", "--match", "--mention", "--mentions", "--merge", "--merged",
+        "--merged-at", "--milestone", "--name-only", "--no-assignee", "--no-label", "--no-milestone",
+        "--no-project", "--number-topics", "--order", "--owner", "--parent", "--patch", "--project",
+        "--reactions", "--repo", "--review", "--review-requested", "--reviewed-by", "--search",
+        "--search-type", "--size", "--sort", "--stars", "--state", "--team-mentions", "--template",
+        "--topic", "--tree", "--type", "--updated", "--visibility",
+    ]
+
+    /// The `gh api` flags that only shape the output or the `Accept` header, split by whether they take
+    /// the next word as their value. Anything else — `-X`, fields, `--input`, `--hostname` — is refused.
+    static let apiValueFlags: Set<String> = ["-H", "--header", "-q", "--jq", "-t", "--template",
+                                             "-p", "--preview", "--cache"]
+    static let apiSwitches: Set<String> = ["-i", "--include", "--paginate", "--slurp", "--silent"]
+    private static let apiAllowedList =
+        "-H/--header (Accept only), -q/--jq, -t/--template, -p/--preview, --cache, -i/--include, --paginate, --slurp, --silent"
+
+    /// Why a flag is refused, for the flags a model is likely to try.
+    private static let refusalReasons: [String: String] = [
+        "-X": "gh api only sends GET, so the method cannot be set",
+        "--method": "gh api only sends GET, so the method cannot be set",
+        "-f": "a field turns the request into a POST",
+        "--raw-field": "a field turns the request into a POST",
+        "-F": "a field turns the request into a POST, and `@path` would send a local file",
+        "--field": "a field turns the request into a POST, and `@path` would send a local file",
+        "--input": "it sends a local file as the request body",
+        "--hostname": "it sends the request to another host",
+        "--verbose": "it prints the full HTTP exchange; leave it out",
+        "-w": "it opens a browser on this machine instead of returning text",
+        "--web": "it opens a browser on this machine instead of returning text",
+    ]
+
+    /// Why `tokens` (the argv after `gh`) may not run, or nil when it may. Fails closed: a flag passes
+    /// only when its subcommand's list names it, and a short flag must be a word of its own, because
+    /// gh (pflag) also reads `-XPOST`, `-iXPOST` and `-X=POST` as `-X`. Requests go to GitHub only: `api`
+    /// sends a GET with no body to a relative API path, and the read subcommands take `-R OWNER/REPO`,
+    /// no word with a URL scheme, and in `repo view` no repository with a host. With
+    /// ``environment(from:)`` that keeps local data on this machine.
+    ///
+    /// pflag ends the flags at a `--` only where a flag can start: right after a flag that still needs
+    /// its value, the `--` is that value and flags go on. The guard knows which `api` flags take a value
+    /// but not which read-subcommand flags do, so there a `--` after a bare flag word does not end the
+    /// check. Words after a `--` that does are gh's arguments; for `api` they are still endpoints.
+    static func refusal(_ tokens: [String]) -> String? {
+        let sub = tokens.first?.lowercased() ?? ""
+        let verb = tokens.prefix(2).map { $0.lowercased() }.joined(separator: " ")
+        let isAPI = sub == "api"
+        guard isAPI || readSubcommands.contains(verb) else {
+            return "error: only read-only gh subcommands are allowed: api, search code|repos|issues|prs|commits, "
+                + "repo view, pr view|list|diff, issue view|list, release view|list"
+        }
+        let command = isAPI ? "gh api" : "gh \(verb)"
+        let args = tokens.dropFirst(isAPI ? 1 : 2)
+        var positionals: [String] = []
+        var index = args.startIndex
+        while index < args.endIndex {
+            let token = args[index]
+            index += 1
+            guard token.hasPrefix("-"), token != "-" else { positionals.append(token); continue }
+            if token == "--" {
+                let previous = index - 2 >= args.startIndex ? args[index - 2] : ""
+                let flagMayTakeIt = !isAPI && previous.hasPrefix("-") && previous != "-" && !previous.contains("=")
+                if flagMayTakeIt { continue }
+                positionals += args[index...]
+                break
+            }
+            let valueHint = "If `\(token)` is the value of the previous flag, write that flag as `--flag=value` "
+                + (isAPI ? "(e.g. `--jq=…`)" : "(e.g. `--search=-label:wip`)")
+                + "; put plain arguments that start with `-` after `--`."
+            let name: String
+            var inlineValue: String?
+            if token.hasPrefix("--") {
+                let parts = token.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                name = String(parts[0])
+                inlineValue = parts.count == 2 ? String(parts[1]) : nil
+            } else if token.count == 2 {
+                name = token
+            } else {
+                let flag = String(token.prefix(2))
+                var rest = token.dropFirst(2)
+                if rest.hasPrefix("=") { rest = rest.dropFirst() }
+                return "error: `\(token)` reads as the short flag `\(flag)` joined with more text. If it is a flag, "
+                    + "write each short flag as its own word and its value as the next word (`\(flag) \(rest)`, "
+                    + "not `\(token)`; `-c -q`, not `-cq`). \(valueHint)"
+            }
+            let allowed = isAPI ? apiValueFlags.contains(name) || apiSwitches.contains(name) : readFlags.contains(name)
+            guard allowed else {
+                let reason = refusalReasons[name] ?? "it is not on the tool's read-only list"
+                let options = isAPI ? "Allowed flags for gh api: \(apiAllowedList)."
+                    : "Any flag `\(command) --help` lists is allowed except -w/--web."
+                let hint = token.hasPrefix("--") || refusalReasons[name] != nil ? "" : " \(valueHint)"
+                return "error: `\(name)` is not allowed with `\(command)`: \(reason). \(options)\(hint)"
+            }
+            let isRepo = name == "-R" || name == "--repo"
+            guard isAPI ? apiValueFlags.contains(name) : isRepo else { continue }
+            let value: String
+            if let inlineValue {
+                value = inlineValue
+            } else if index < args.endIndex {
+                value = args[index]
+                index += 1
+            } else {
+                return "error: `\(name)` needs a value after it"
+            }
+            if name == "-H" || name == "--header",
+               !value.trimmingCharacters(in: .whitespaces).lowercased().hasPrefix("accept:") {
+                return "error: gh api allows only an `Accept: …` header (e.g. `-H \"Accept: application/vnd.github.raw\"`)"
+            }
+            if isRepo, !isOwnerRepo(value) {
+                return "error: `\(name)` takes `OWNER/REPO`, not `\(value)`: a host or URL would send the request "
+                    + "somewhere other than GitHub"
+            }
+        }
+        guard isAPI else {
+            // Outside `api` a bare word may be an argument or a flag's value; the guard can't tell which,
+            // so it judges the word by what it holds. A host is reached only through a URL with a scheme,
+            // or, in `repo view`, a repository written with a host (`HOST/O/R`, `git@HOST:O/R`).
+            let valueHint = "If it is the value of the previous flag, write that flag as `--flag=value`."
+            if sub == "search" { return nil }
+            if let url = positionals.first(where: { $0.contains("://") }) {
+                return "error: `\(url)` is a URL, which would send the request to its host; `\(command)` takes "
+                    + "a number, branch or tag, with `-R OWNER/REPO` for the repository. \(valueHint)"
+            }
+            if verb == "repo view",
+               let repo = positionals.first(where: { ($0.contains("/") || $0.contains(":")) && !isOwnerRepo($0) }) {
+                return "error: `gh repo view` takes `OWNER/REPO`, not `\(repo)`: a host would send the request "
+                    + "somewhere other than GitHub. \(valueHint)"
+            }
+            return nil
+        }
+        guard positionals.count == 1, let endpoint = positionals.first else {
+            return "error: gh api takes exactly one endpoint, e.g. `api repos/OWNER/REPO/contents/PATH` "
+                + "(got \(positionals.count))"
+        }
+        let path = endpoint.prefix { $0 != "?" }
+        if path.contains(":") || path.hasPrefix("//") {
+            return "error: gh api takes a relative GitHub API path such as `repos/OWNER/REPO`, not a URL or host"
+        }
+        if endpoint.lowercased() == "graphql" {
+            return "error: gh api graphql is not allowed: GraphQL requests are POSTs. Use a REST path such as `repos/OWNER/REPO`"
+        }
+        return nil
+    }
+
+    /// `OWNER/REPO` with no host in front and no URL scheme.
+    static func isOwnerRepo(_ value: String) -> Bool {
+        let parts = value.split(separator: "/", omittingEmptySubsequences: false)
+        return parts.count == 2 && parts.allSatisfy { !$0.isEmpty } && !value.contains(":")
+    }
+
     /// Split a command line into argv the way a POSIX shell would, honoring single and double quotes
     /// (quotes group and are stripped; whitespace outside quotes separates). Returns nil on an
     /// unterminated quote. No variable/command expansion — we exec directly, so `$…`/backticks are
-    /// literal (and already rejected by `call`).
+    /// literal.
     static func tokenize(_ s: String) -> [String]? {
         var tokens: [String] = []
         var current = ""

@@ -157,6 +157,13 @@ private final class CapturingExecutor: Executor, @unchecked Sendable {
     private(set) var toolNames: [[String]] = []
     /// `enable_thinking` as each call sent it; nil when absent (the engine reads that as on).
     private(set) var thinking: [Bool?] = []
+    /// `preserve_thinking` as each call sent it; nil when absent (the template then keeps only the
+    /// turns after the last user message).
+    private(set) var preserving: [Bool?] = []
+    /// The custom `x_budget` key as each call sent it; nil when absent.
+    private(set) var budgets: [Int?] = []
+    /// `tool_calls` as each call sent it; nil when absent (the engine reads that as allowed).
+    private(set) var calls: [Bool?] = []
     init(_ turns: [ModelTurn]) { self.turns = turns }
 
     func runModel(
@@ -178,6 +185,9 @@ private final class CapturingExecutor: Executor, @unchecked Sendable {
         maxTokens.append(arguments.maxTokens)
         toolNames.append(arguments.tools.map(\.name))
         if case .bool(let enabled)? = arguments["enable_thinking"]?.value { thinking.append(enabled) } else { thinking.append(nil) }
+        if case .bool(let keep)? = arguments["preserve_thinking"]?.value { preserving.append(keep) } else { preserving.append(nil) }
+        if case .integer(let budget)? = arguments["x_budget"]?.value { budgets.append(budget) } else { budgets.append(nil) }
+        if case .bool(let may)? = arguments["tool_calls"]?.value { calls.append(may) } else { calls.append(nil) }
         let turn = turns[Swift.min(index, turns.count - 1)]
         index += 1
         lock.unlock()
@@ -223,6 +233,65 @@ final class CodingAgentLoopTests: XCTestCase {
         let plain = try XCTUnwrap(other.systemPrompts.last)
         XCTAssertFalse(plain.contains("Current working directory:"),
                        "no jail, no claim about where the agent is")
+    }
+
+    /// What `.modelParameters` sets goes out with every work turn and not with a forced answer turn,
+    /// which is another prompt; `.outputTokens` caps both, the way `maxOutputTokens` at init does.
+    ///
+    /// - Author: Claude
+    func testAgentLoop_modelParametersReachTheWorkTurnsOnly() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cp-params-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let jail = PathJail(root: root)
+        let executor = CapturingExecutor([
+            ModelTurn(toolCalls: [ToolCall(
+                id: "1", name: "write_file", arguments: #"{"path":"hello.txt","content":"hi"}"#)]),
+            ModelTurn(reply: "done"),
+        ])
+        let pipeline = CodingAgentPipeline(
+            task: "create hello.txt", tools: defaultCodingTools(jail: jail), maxTurns: 2, jail: jail)
+            .modelParameters(["x_budget": .integer(1800)])
+            .outputTokens(3072)
+            .answerOnLastTurn()
+        _ = try await PipelineRunner.run(pipeline, executor: executor)
+
+        XCTAssertEqual(executor.toolNames.map(\.isEmpty), [false, true], "a work turn, then the forced one")
+        XCTAssertEqual(executor.budgets, [1800, nil])
+        XCTAssertEqual(executor.maxTokens, [3072, 3072])
+    }
+
+    /// Compaction keeps the newest thought in the turns it keeps, even when the tail alone is over
+    /// its allowance: a history with no think block left switches the model's thinking off.
+    ///
+    /// - Author: Claude
+    func testAgentLoop_compactionKeepsTheTailsNewestThought() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cp-agent-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try String(repeating: "x ", count: 5_000)
+            .write(to: root.appendingPathComponent("big.txt"), atomically: true, encoding: .utf8)
+
+        let executor = CapturingExecutor([
+            ModelTurn(toolCalls: [ToolCall(id: "1", name: "read_file", arguments: #"{"path":"big.txt"}"#)],
+                      reasoning: "PLAN-ONE"),
+            ModelTurn(reply: "COMPACTED"),
+            ModelTurn(reply: "done"),
+        ])
+        // Tail allowance 2,000 chars; the one exchange to keep is ~10k, so it is cut to fit.
+        let pipeline = CodingAgentPipeline(
+            task: "read big.txt", tools: defaultCodingTools(jail: PathJail(root: root)),
+            maxTurns: 8, contextTokens: 8_192, maxOutputTokens: 4_096, replaysReasoning: true)
+        _ = try await PipelineRunner.run(pipeline, executor: executor)
+
+        let after = executor.conversations[2]
+        let kept = try XCTUnwrap(after.first { $0.role == "assistant" })
+        XCTAssertEqual(kept.reasoning, "PLAN-ONE", "the kept turn still shows the model that it thought")
+        XCTAssertTrue(after.contains { $0.role == "tool" && $0.content.hasSuffix("…[truncated]") })
+        XCTAssertLessThan(ConversationHistory.charCount(after), 6_000)
     }
 
     func testAgentLoop_runsToolThenReplies() async throws {
@@ -280,6 +349,34 @@ final class CodingAgentLoopTests: XCTestCase {
         XCTAssertEqual(sent.last?.content, AgentLoop.repeatedCallNudge)
         XCTAssertEqual(ConversationHistory.exchanges(Array(sent.dropFirst())).map(\.count), [2, 3, 1],
                        "each assistant turn and all of its results are one exchange")
+    }
+
+    /// Replayed reasoning is only useful if the template keeps it: with `replaysReasoning` every work
+    /// turn asks for `preserve_thinking`, through the nudge that would otherwise cut it; without it
+    /// the parameter is not sent, since no request carries reasoning to keep.
+    ///
+    /// - Author: Claude
+    func testAgentLoop_preserveThinkingGoesWithReplayedReasoning() async throws {
+        for replays in [true, false] {
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("cp-preserve-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let executor = CapturingExecutor([
+                ModelTurn(toolCalls: [ToolCall(id: "1", name: "list_dir", arguments: #"{"path":"."}"#)], reasoning: "Look."),
+                ModelTurn(toolCalls: [ToolCall(id: "2", name: "list_dir", arguments: #"{"path":"."}"#)], reasoning: "Again."),
+                ModelTurn(reply: "done", reasoning: "Done."),
+            ])
+            let pipeline = CodingAgentPipeline(
+                task: "t", tools: defaultCodingTools(jail: PathJail(root: root)), maxTurns: 4,
+                replaysReasoning: replays)
+            _ = try await PipelineRunner.run(pipeline, executor: executor)
+
+            XCTAssertEqual(try XCTUnwrap(executor.conversations.last).last?.role, "user",
+                           "the repeated call drew the user-role nudge")
+            XCTAssertEqual(executor.preserving, replays ? [true, true, true] : [nil, nil, nil], "replays=\(replays)")
+        }
     }
 
     /// The nudge reports what the loop saw — a call and result it has seen before — and draws no
@@ -447,6 +544,168 @@ final class CodingAgentLoopTests: XCTestCase {
         let compacted = executor.messages.first { $0.contains("[Earlier context compacted:]") }
         XCTAssertNotNil(compacted, "expected a compacted transcript to reach the model")
         XCTAssertTrue(compacted?.contains("COMPACTED") ?? false)
+        // By default the summarizer reads a transcript: nothing the loop asks of the executor.
+        XCTAssertTrue(executor.messages[1].contains("Assistant: call read_file("), executor.messages[1])
+        XCTAssertFalse(executor.messages[1].hasPrefix("Task:"), executor.messages[1])
+    }
+
+    /// With the fact summary on, the summarizer is shown the task and the middle as a report of
+    /// numbered calls with their results — nothing it can continue as a transcript — and asked for
+    /// the facts the task still needs; the work turns' model parameters reach it too.
+    ///
+    /// - Author: Claude
+    func testAgentLoop_factSummaryShowsTheSummarizerTheTaskAndAReport() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cp-agent-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try String(repeating: "x ", count: 5_000)
+            .write(to: root.appendingPathComponent("big.txt"), atomically: true, encoding: .utf8)
+        let executor = CapturingExecutor([
+            ModelTurn(toolCalls: [ToolCall(id: "1", name: "read_file", arguments: #"{"path":"big.txt"}"#)]),
+            ModelTurn(reply: "- big.txt: x x x"),
+            ModelTurn(reply: "done"),
+        ])
+        let pipeline = CodingAgentPipeline(
+            task: "read big.txt", tools: defaultCodingTools(jail: PathJail(root: root)),
+            maxTurns: 8, contextTokens: 8_192, maxOutputTokens: 4_096)
+            .compacting(CompactionOptions(factSummary: true))
+            .modelParameters(["x_budget": .integer(7)])
+        _ = try await PipelineRunner.run(pipeline, executor: executor)
+
+        let summarizer = executor.messages[1]
+        XCTAssertTrue(summarizer.hasPrefix("Task: read big.txt\n\nThe part of the transcript being compacted:"), summarizer)
+        XCTAssertTrue(summarizer.contains("Call 1 · read_file("), summarizer)
+        XCTAssertTrue(summarizer.contains("\nreturned:\nx x"), summarizer)
+        XCTAssertFalse(summarizer.contains("Assistant:"), summarizer)
+        XCTAssertTrue(executor.systemPrompts[1].contains("facts in that part"), executor.systemPrompts[1])
+        XCTAssertEqual(executor.budgets[1], 7, "the summarizer decodes as a work turn does")
+        XCTAssertTrue(executor.messages[2].contains("[Earlier context compacted:]\n- big.txt: x x x"))
+    }
+
+    /// A summarizer turn cut off inside its thought with no reply is asked again without thinking,
+    /// once, and that reply is what compacts the history; the cut turn changes nothing.
+    ///
+    /// - Author: Claude
+    func testAgentLoop_asksTheSummarizerAgainWithoutThinkingWhenItsThoughtWasCut() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cp-agent-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try String(repeating: "x ", count: 5_000)
+            .write(to: root.appendingPathComponent("big.txt"), atomically: true, encoding: .utf8)
+        let executor = CapturingExecutor([
+            ModelTurn(toolCalls: [ToolCall(id: "1", name: "read_file", arguments: #"{"path":"big.txt"}"#)]),
+            ModelTurn(reasoning: "But why would it return x? Let me trace through", reasoningTruncated: true),
+            ModelTurn(reply: "- big.txt: x x x"),
+            ModelTurn(reply: "done"),
+        ])
+        let pipeline = CodingAgentPipeline(
+            task: "read big.txt", tools: defaultCodingTools(jail: PathJail(root: root)),
+            maxTurns: 8, contextTokens: 8_192, maxOutputTokens: 4_096)
+            .compacting(CompactionOptions(factSummary: true))
+        _ = try await PipelineRunner.run(pipeline, executor: executor)
+
+        XCTAssertEqual(executor.messages.count, 4)
+        for call in 1...2 {
+            XCTAssertTrue(executor.messages[call].hasPrefix("Task: read big.txt\n\nThe part of the transcript being compacted:"),
+                          executor.messages[call])
+        }
+        XCTAssertNil(executor.thinking[1], "the first summarizer turn thinks, as the loop does")
+        XCTAssertEqual(executor.thinking[2], false, "the retry does not")
+        XCTAssertTrue(executor.messages[3].contains("[Earlier context compacted:]\n- big.txt: x x x"), executor.messages[3])
+        XCTAssertFalse(executor.messages[3].contains("[Earlier context compacted:]\n<"), "the cut turn left no recap")
+    }
+
+    /// A middle that holds only an earlier recap is not compacted again: with the kept tail's newest
+    /// thought alone over the trigger, that would summarize the recap forever and never take a turn.
+    /// The loop goes on to a work turn and trimming keeps the history under the cap.
+    ///
+    /// - Author: Claude
+    func testAgentLoop_doesNotCompactAgainWhenOnlyTheRecapIsLeft() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cp-agent-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try "hello".write(to: root.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+        try String(repeating: "x ", count: 2_500)
+            .write(to: root.appendingPathComponent("big.txt"), atomically: true, encoding: .utf8)
+
+        // Cap 8,000 chars, trigger 6,000, tail allowance 2,000: the second exchange's 7,000-char
+        // thought outlives the allowance on its own, so head + recap + tail stay over the trigger.
+        let executor = CapturingExecutor([
+            ModelTurn(toolCalls: [ToolCall(id: "1", name: "read_file", arguments: #"{"path":"a.txt"}"#)],
+                      reasoning: "PLAN"),
+            ModelTurn(toolCalls: [ToolCall(id: "2", name: "read_file", arguments: #"{"path":"big.txt"}"#)],
+                      reasoning: String(repeating: "t", count: 7_000)),
+            ModelTurn(reply: "COMPACTED"),
+            ModelTurn(reply: "done"),
+        ])
+        let pipeline = CodingAgentPipeline(
+            task: "read them", tools: defaultCodingTools(jail: PathJail(root: root)),
+            maxTurns: 8, contextTokens: 8_192, maxOutputTokens: 4_096, replaysReasoning: true)
+        let answer = try await PipelineRunner.run(pipeline, executor: executor)
+
+        XCTAssertEqual(try JSONDecoder().decode(String.self, from: answer), "done")
+        XCTAssertEqual(executor.calls, [nil, nil, false, nil], "one compaction, then a work turn")
+        let last = try XCTUnwrap(executor.conversations.last)
+        XCTAssertTrue(last.contains { $0.content.hasPrefix("[Earlier context compacted:]") })
+        XCTAssertTrue(last.contains { $0.reasoning == String(repeating: "t", count: 7_000) }, "the kept thought stays")
+    }
+
+    /// The loop's own keys win over shared model parameters that name them: with thinking off, a
+    /// shared `enable_thinking: true` does not turn it back on, and a shared `tool_calls: true` does
+    /// not let the summarizer call.
+    ///
+    /// - Author: Claude
+    func testAgentLoop_itsOwnKeysWinOverSharedParameters() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cp-agent-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try String(repeating: "x ", count: 5_000)
+            .write(to: root.appendingPathComponent("big.txt"), atomically: true, encoding: .utf8)
+        let executor = CapturingExecutor([
+            ModelTurn(toolCalls: [ToolCall(id: "1", name: "read_file", arguments: #"{"path":"big.txt"}"#)]),
+            ModelTurn(reply: "- big.txt: x x x"),
+            ModelTurn(reply: "done"),
+        ])
+        let pipeline = CodingAgentPipeline(
+            task: "read big.txt", tools: defaultCodingTools(jail: PathJail(root: root)),
+            maxTurns: 8, contextTokens: 8_192, maxOutputTokens: 4_096, enableThinking: false)
+            .modelParameters(["enable_thinking": .bool(true), "tool_calls": .bool(true)])
+        _ = try await PipelineRunner.run(pipeline, executor: executor)
+
+        XCTAssertEqual(executor.thinking, [false, false, false])
+        XCTAssertEqual(executor.calls, [true, false, true], "the shared key reaches the work turns, not the summarizer")
+    }
+
+    /// The summarizer's turn, and no other, is sent `tool_calls: false` by default; its thinking
+    /// follows the loop's, and the work turns are sent as before.
+    ///
+    /// - Author: Claude
+    func testAgentLoop_summarizerLeversReachTheSummarizerTurnAlone() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cp-agent-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try String(repeating: "x ", count: 5_000)
+            .write(to: root.appendingPathComponent("big.txt"), atomically: true, encoding: .utf8)
+        let executor = CapturingExecutor([
+            ModelTurn(toolCalls: [ToolCall(id: "1", name: "read_file", arguments: #"{"path":"big.txt"}"#)]),
+            ModelTurn(reply: "- big.txt: x x x"),
+            ModelTurn(reply: "done"),
+        ])
+        let pipeline = CodingAgentPipeline(
+            task: "read big.txt", tools: defaultCodingTools(jail: PathJail(root: root)),
+            maxTurns: 8, contextTokens: 8_192, maxOutputTokens: 4_096)
+        _ = try await PipelineRunner.run(pipeline, executor: executor)
+
+        XCTAssertEqual(executor.thinking, [nil, nil, nil])
+        XCTAssertEqual(executor.calls, [nil, false, nil])
     }
 
     // Thinking turned off applies to every model call the loop makes, the compaction summary included.
@@ -614,6 +873,283 @@ final class ConversationHistoryTests: XCTestCase {
         XCTAssertLessThanOrEqual(ConversationHistory.charCount(trimmed), 1_060)
         XCTAssertEqual(trimmed.map(\.content), ["Task: x", "", "RESULT-c"])
         XCTAssertEqual(trimmed[1].reasoning, thought)
+    }
+
+    /// The newest thought outlives the budget itself: a history with no think block left shows the
+    /// model an assistant that does not think, and it stops thinking. Content shrinks instead.
+    ///
+    /// - Author: Claude
+    func testFit_keepsTheNewestThoughtOverTheBudget() {
+        let thought = String(repeating: "t", count: 2_000)
+        let turns = [
+            ConversationTurn(role: "user", content: "Task: x"),
+            ConversationTurn(role: "assistant", content: "",
+                             toolCalls: [ToolCall(id: "1", name: "read_file", arguments: #"{"path":"a"}"#)],
+                             reasoning: thought),
+            ConversationTurn(role: "tool", content: String(repeating: "a", count: 3_000), toolCallID: "1"),
+        ]
+        let fitted = ConversationHistory.fit(turns, toCharacters: 1_000)
+        XCTAssertEqual(fitted[1].reasoning, thought, "the only thought is the newest, and it stays")
+        XCTAssertTrue(fitted[2].content.hasSuffix("…[truncated]"), "the result shrinks instead")
+        XCTAssertLessThan(fitted[2].content.count, 3_000)
+    }
+
+    /// `.all` keeps every thought whatever the pressure; `.untilPressure` keeps them until the
+    /// fraction is crossed, then the newest alone.
+    ///
+    /// - Author: Claude
+    func testRetainingReasoning_keepsEverythingOrTheNewestPastTheFraction() {
+        func turn(_ thought: String) -> ConversationTurn {
+            ConversationTurn(role: "assistant", content: "", toolCalls: [ToolCall(id: thought, name: "x", arguments: "{}")],
+                             reasoning: thought)
+        }
+        let turns = [ConversationTurn(role: "user", content: "Task: x")]
+            + ["a".padding(toLength: 400, withPad: "a", startingAt: 0), "b2", "c3", "d4"].map(turn)
+        func thoughts(_ out: [ConversationTurn]) -> [String?] { out.dropFirst().map(\.reasoning) }
+
+        XCTAssertEqual(thoughts(ConversationHistory.retainingReasoning(turns, as: .all, pressure: 0.9)),
+                       [String(repeating: "a", count: 400), "b2", "c3", "d4"])
+        XCTAssertEqual(thoughts(ConversationHistory.retainingReasoning(turns, as: .untilPressure(0.5), pressure: 0.4)),
+                       [String(repeating: "a", count: 400), "b2", "c3", "d4"], "under the fraction nothing changes")
+        XCTAssertEqual(thoughts(ConversationHistory.retainingReasoning(turns, as: .untilPressure(0.5), pressure: 0.6)),
+                       [nil, nil, nil, "d4"], "over it the newest alone stays")
+    }
+
+    /// By default the history keeps every thought until it is two thirds of the way to the
+    /// compaction trigger, then the newest alone — before any compaction.
+    ///
+    /// - Author: Claude
+    func testAgentLoop_keepsEveryThoughtUntilTwoThirdsOfTheTriggerByDefault() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cp-agent-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try "hello".write(to: root.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+        let read = ToolCall(id: "1", name: "read_file", arguments: #"{"path":"a.txt"}"#)
+        // Trigger 11,520 chars (cap 15,360 × 3/4); two thirds of it is 7,680. Four 2,000-char
+        // thoughts cross that line after the fourth turn and stay under the trigger itself.
+        let thoughts = (1...4).map { String(repeating: "\($0)", count: 2_000) }
+        let executor = CapturingExecutor(thoughts.map { ModelTurn(toolCalls: [read], reasoning: $0) }
+                                         + [ModelTurn(reply: "done")])
+        let pipeline = CodingAgentPipeline(
+            task: "read a.txt", tools: defaultCodingTools(jail: PathJail(root: root)),
+            maxTurns: 8, contextTokens: 8_192, maxOutputTokens: 1_024, replaysReasoning: true)
+        _ = try await PipelineRunner.run(pipeline, executor: executor)
+
+        XCTAssertEqual(pipeline.loop.reasoningRetention, .untilPressure(2.0 / 3.0))
+        let kept = executor.conversations.map { $0.compactMap(\.reasoning).filter { !$0.isEmpty } }
+        XCTAssertEqual(kept, [[], [thoughts[0]], [thoughts[0], thoughts[1]], [thoughts[0], thoughts[1], thoughts[2]],
+                              [thoughts[3]]])
+        XCTAssertFalse(executor.conversations.last!.contains { $0.content.contains("compacted") })
+    }
+
+    /// Masking shows an aged result as a stub naming its call and keeps the newest exchanges whole;
+    /// the superseded rule masks a read of a path a later exchange read or wrote, whatever its age.
+    /// Masking twice changes nothing.
+    ///
+    /// - Author: Claude
+    func testMaskingObservations_masksAgedAndSupersededResultsOnce() {
+        func exchange(_ id: String, _ name: String, _ path: String, result: String) -> [ConversationTurn] {
+            [ConversationTurn(role: "assistant", content: "",
+                              toolCalls: [ToolCall(id: id, name: name, arguments: #"{"path":"\#(path)"}"#)]),
+             ConversationTurn(role: "tool", content: result, toolCallID: id)]
+        }
+        let turns = [ConversationTurn(role: "user", content: "Task: x")]
+            + exchange("1", "read_file", "a.txt", result: "one\ntwo\nthree")
+            + exchange("2", "read_file", "b.txt", result: "bee")
+            + exchange("3", "write_file", "a.txt", result: "written")
+            + exchange("4", "read_file", "c.txt", result: "sea")
+        func results(_ out: [ConversationTurn]) -> [String] { out.filter { $0.role == "tool" }.map(\.content) }
+
+        let aged = ConversationHistory.maskingObservations(turns, as: ObservationMasking(keepExchanges: 2))
+        XCTAssertEqual(results(aged), ["[masked: read_file returned 3 lines; call it again to see them]",
+                                       "[masked: read_file returned 1 lines; call it again to see them]",
+                                       "written", "sea"])
+        XCTAssertEqual(aged.filter { $0.role == "assistant" }.map(\.toolCalls), turns.filter { $0.role == "assistant" }.map(\.toolCalls),
+                       "the calls stay")
+
+        let stale = ConversationHistory.maskingObservations(turns, as: ObservationMasking(keepExchanges: 4))
+        XCTAssertEqual(results(stale), ["[masked: read_file returned 3 lines; call it again to see them]", "bee", "written", "sea"],
+                       "nothing by age; the read of a.txt goes because the write superseded it")
+
+        XCTAssertEqual(ConversationHistory.maskingObservations(aged, as: ObservationMasking(keepExchanges: 2)), aged)
+    }
+
+    /// A result belongs to the call with its id in its own exchange: ids that repeat across exchanges
+    /// do not hand an older result to the newest call, by age or by the kept newest read.
+    ///
+    /// - Author: Claude
+    func testMaskingObservations_resolvesResultsWithinTheirExchange() {
+        func exchange(_ id: String, _ path: String, result: String) -> [ConversationTurn] {
+            [ConversationTurn(role: "assistant", content: "",
+                              toolCalls: [ToolCall(id: id, name: "read_file", arguments: #"{"path":"\#(path)"}"#)]),
+             ConversationTurn(role: "tool", content: result, toolCallID: id)]
+        }
+        let turns = [ConversationTurn(role: "user", content: "Task: x")]
+            + exchange("1", "a.txt", result: "old a")
+            + exchange("1", "b.txt", result: "bee")
+            + exchange("1", "a.txt", result: "new a")
+        func results(_ out: [ConversationTurn]) -> [String] { out.filter { $0.role == "tool" }.map(\.content) }
+
+        XCTAssertEqual(results(ConversationHistory.maskingObservations(turns, as: ObservationMasking(keepExchanges: 1))),
+                       ["[masked: read_file returned 1 lines; call it again to see them]",
+                        "[masked: read_file returned 1 lines; call it again to see them]", "new a"])
+        XCTAssertEqual(results(ConversationHistory.maskingObservations(
+                           turns, as: ObservationMasking(keepExchanges: 1, keepsNewestReadPerPath: true))),
+                       ["[masked: read_file returned 1 lines; call it again to see them]", "bee", "new a"],
+                       "the newest read of each path stays; the older read of a.txt under the same id is masked")
+    }
+
+    /// The newest read of every path can be kept whole whatever its age or what came after it.
+    ///
+    /// - Author: Claude
+    func testMaskingObservations_keepsTheNewestReadPerPath() {
+        func exchange(_ id: String, _ name: String, _ path: String, result: String) -> [ConversationTurn] {
+            [ConversationTurn(role: "assistant", content: "",
+                              toolCalls: [ToolCall(id: id, name: name, arguments: #"{"path":"\#(path)"}"#)]),
+             ConversationTurn(role: "tool", content: result, toolCallID: id)]
+        }
+        let turns = [ConversationTurn(role: "user", content: "Task: x")]
+            + exchange("1", "read_file", "a.txt", result: "old a")
+            + exchange("2", "edit_file", "a.txt", result: "edited")
+            + exchange("3", "read_file", "b.txt", result: "bee")
+            + exchange("4", "bash", "", result: "ok")
+        func results(_ out: [ConversationTurn]) -> [String] { out.filter { $0.role == "tool" }.map(\.content) }
+
+        let aged = ConversationHistory.maskingObservations(turns, as: ObservationMasking(keepExchanges: 1))
+        XCTAssertEqual(results(aged).filter { !$0.hasPrefix("[masked") }, ["ok"])
+
+        let keepsReads = ConversationHistory.maskingObservations(turns, as: ObservationMasking(keepExchanges: 1, keepsNewestReadPerPath: true))
+        XCTAssertEqual(results(keepsReads), ["old a", "[masked: edit_file returned 1 lines; call it again to see them]", "bee", "ok"],
+                       "the newest read of a.txt and of b.txt stay whole although both aged and a.txt was edited")
+    }
+
+    /// Masking gated on pressure leaves the history alone until it is two thirds of the way to the
+    /// trigger, then masks as usual.
+    ///
+    /// - Author: Claude
+    func testAgentLoop_masksOnlyOncePressureIsReached() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cp-agent-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        for name in ["a", "b", "c", "d"] {
+            try String(repeating: "\(name) ", count: 1_000).write(to: root.appendingPathComponent("\(name).txt"), atomically: true, encoding: .utf8)
+        }
+        func read(_ id: String, _ name: String) -> ToolCall {
+            ToolCall(id: id, name: "read_file", arguments: #"{"path":"\#(name).txt"}"#)
+        }
+        let executor = CapturingExecutor([
+            ModelTurn(toolCalls: [read("1", "a")]), ModelTurn(toolCalls: [read("2", "b")]),
+            ModelTurn(toolCalls: [read("3", "c")]), ModelTurn(toolCalls: [read("4", "d")]), ModelTurn(reply: "done"),
+        ])
+        // Trigger 11,520 chars, two thirds 7,680: three 2,000-char results stay under it, four cross it.
+        let pipeline = CodingAgentPipeline(
+            task: "read them", tools: defaultCodingTools(jail: PathJail(root: root)),
+            maxTurns: 8, contextTokens: 8_192, maxOutputTokens: 1_024)
+            .maskingObservations(ObservationMasking(keepExchanges: 1, atPressure: 2.0 / 3.0))
+            .withoutCompaction()
+        _ = try await PipelineRunner.run(pipeline, executor: executor)
+
+        let shown = executor.conversations.map { $0.filter { $0.role == "tool" }.map { String($0.content.prefix(14)) } }
+        XCTAssertEqual(shown, [[], ["a a a a a a a "], ["a a a a a a a ", "b b b b b b b "], ["a a a a a a a ", "b b b b b b b ", "c c c c c c c "],
+                               ["[masked: read_", "[masked: read_", "[masked: read_", "d d d d d d d "]])
+    }
+
+    /// With masking on, each work turn's prompt shows the newest exchanges' results whole and the
+    /// older ones as stubs; with compaction off the summarizer is never called, trimming alone
+    /// keeps the history under the cap.
+    ///
+    /// - Author: Claude
+    func testAgentLoop_masksOlderResultsAndCanRunWithoutCompaction() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cp-agent-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        for name in ["a", "b", "c"] {
+            try String(repeating: "\(name) ", count: 2_500).write(to: root.appendingPathComponent("\(name).txt"), atomically: true, encoding: .utf8)
+        }
+        func read(_ id: String, _ name: String) -> ToolCall {
+            ToolCall(id: id, name: "read_file", arguments: #"{"path":"\#(name).txt"}"#)
+        }
+        let executor = CapturingExecutor([
+            ModelTurn(toolCalls: [read("1", "a")]), ModelTurn(toolCalls: [read("2", "b")]),
+            ModelTurn(toolCalls: [read("3", "c")]), ModelTurn(reply: "done"),
+        ])
+        // Three 5,000-char results against a 15,360-char cap: plain would compact at 11,520.
+        let pipeline = CodingAgentPipeline(
+            task: "read them", tools: defaultCodingTools(jail: PathJail(root: root)),
+            maxTurns: 8, contextTokens: 8_192, maxOutputTokens: 1_024)
+            .maskingObservations(ObservationMasking(keepExchanges: 1))
+            .withoutCompaction()
+        _ = try await PipelineRunner.run(pipeline, executor: executor)
+
+        let shown = executor.conversations.map { $0.filter { $0.role == "tool" }.map { $0.content.prefix(14) } }
+        XCTAssertEqual(shown.map { $0.map(String.init) },
+                       [[], ["a a a a a a a "], ["[masked: read_", "b b b b b b b "], ["[masked: read_", "[masked: read_", "c c c c c c c "]])
+        XCTAssertEqual(executor.calls, [nil, nil, nil, nil], "no summarizer turn")
+        XCTAssertFalse(executor.conversations.last!.contains { $0.content.contains("compacted") })
+    }
+
+    /// Restating ends every work prompt with the task as the last user message, and the history
+    /// never carries it.
+    ///
+    /// - Author: Claude
+    func testAgentLoop_restatesTheTaskAsTheLastUserMessage() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cp-agent-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try "hello".write(to: root.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+        let read = ToolCall(id: "1", name: "read_file", arguments: #"{"path":"a.txt"}"#)
+        let executor = CapturingExecutor([ModelTurn(toolCalls: [read]), ModelTurn(reply: "done")])
+        let pipeline = CodingAgentPipeline(
+            task: "read a.txt", tools: defaultCodingTools(jail: PathJail(root: root)),
+            maxTurns: 4, contextTokens: 8_192)
+            .restatingTask()
+        _ = try await PipelineRunner.run(pipeline, executor: executor)
+
+        for message in executor.messages {
+            XCTAssertTrue(message.hasSuffix("Reminder of the task:\nread a.txt"), message.suffix(80).description)
+        }
+        XCTAssertFalse(executor.conversations[1].contains { $0.content.hasPrefix("Reminder of the task") })
+    }
+
+    /// The report render numbers each call with its result and keeps the assistant's words as
+    /// notes; no line in it reads as a turn to continue.
+    ///
+    /// - Author: Claude
+    func testReport_numbersCallsWithTheirResultsAndHasNoTurnToContinue() {
+        let turns = [
+            ConversationTurn(role: "assistant", content: "Looking at the logs.",
+                             toolCalls: [ToolCall(id: "a", name: "read_file", arguments: #"{"path":"db.log"}"#),
+                                         ToolCall(id: "b", name: "grep", arguments: #"{"query":"ORD-1"}"#)]),
+            ConversationTurn(role: "tool", content: "line one", toolCallID: "a"),
+            ConversationTurn(role: "tool", content: "gateway.log:5: ORD-1", toolCallID: "b"),
+            ConversationTurn(role: "user", content: "Continue."),
+            ConversationTurn(role: "assistant", content: "",
+                             toolCalls: [ToolCall(id: "c", name: "read_file", arguments: #"{"path":"w.log"}"#)]),
+            ConversationTurn(role: "tool", content: "line two", toolCallID: "c"),
+        ]
+        let report = ConversationHistory.report(turns)
+        XCTAssertEqual(report, """
+            Note: Looking at the logs.
+
+            Call 1 · read_file({"path":"db.log"})
+            returned:
+            line one
+
+            Call 2 · grep({"query":"ORD-1"})
+            returned:
+            gateway.log:5: ORD-1
+
+            Continue.
+
+            Call 3 · read_file({"path":"w.log"})
+            returned:
+            line two
+            """)
+        XCTAssertFalse(report.contains("Assistant:"))
     }
 
     /// A history whose bulk is a tool call's arguments must still come in under the budget.

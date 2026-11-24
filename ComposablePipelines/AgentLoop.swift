@@ -11,6 +11,74 @@ import PipelineAST
 @_spi(Internals) import PipelineDSL  // ExecutionContext.isEmittingPipelineGraph — the build-site trap
 @_spi(Internals) import ExecutionEngine  // TelemetryContext — emit tool spans via the ambient observer
 
+/// How an ``AgentLoop`` compacts: what its summarizer reads and how its turn is sent. The default
+/// is a recap of a transcript, which asks nothing of the executor. The fact summary is what
+/// measured best on a small model, from a summarizer that can only write text — and that is the
+/// executor's to enforce: shown the task with no ban in force, the model answers most compactions
+/// with the next call, and every such reply lands as an empty summary. Turn it on where the
+/// executor honours `tool_calls: false` (the in-process engine does; an HTTP route takes no such key).
+///
+/// - Author: Claude
+public struct CompactionOptions: Sendable, Equatable {
+    /// The summarizer reads the older middle as a report of calls and their results, under the
+    /// task, and replies with the facts the task still needs (``ConversationHistory/report(_:)``).
+    /// Off, it reads the middle as a transcript and replies with a recap of it — which a small model
+    /// continues instead of writing, call by call, in half the compactions measured.
+    public var factSummary: Bool
+    /// The summarizer's turn may open a tool call. Off, the turn carries `tool_calls: false` and an
+    /// executor that honours it bans the call grammar at decode: the reply is text, whatever the
+    /// model meant to do. Shown the task, a small model takes it as its own and answers most
+    /// compactions with the next call, and every such reply lands as an empty summary; the ban is
+    /// the one lever measured to end that (a summarizer that thinks less, or a report without call
+    /// syntax, or a worked example, did not).
+    public var summarizerMayCall: Bool
+
+    public init(factSummary: Bool = false, summarizerMayCall: Bool = false) {
+        self.factSummary = factSummary
+        self.summarizerMayCall = summarizerMayCall
+    }
+}
+
+/// How much of its earlier reasoning an ``AgentLoop`` keeps in the history it sends back. The
+/// newest thought always stays whole (see ``ConversationHistory/retainingReasoning(_:as:pressure:)``).
+///
+/// - Author: Claude
+public enum ReasoningRetention: Sendable, Equatable {
+    /// Every thought until the history reaches this fraction of the compaction trigger, then the
+    /// newest alone — thoughts are the first thing given up under pressure, before any compaction.
+    /// The loop's default, at two thirds: the cheapest retention on a small model that was not
+    /// also the slowest, and the one that passed most.
+    case untilPressure(Double)
+    /// Every thought, until the history budgets drop the oldest.
+    case all
+}
+
+/// What the history shows of a tool result once it has aged. The newest exchanges keep their
+/// results; older ones show a one-line stub naming the call, and the model calls again for what it
+/// needs. A `read_file` result is masked whatever its age once a later exchange read or wrote the
+/// same path. The calls and the thoughts stay. Masking takes tokens out of the window without a
+/// summarizer. The newest exchange alone is what measured: a wider window kept a one-exchange
+/// fan-out of reads whole and saved nothing.
+///
+/// - Author: Claude
+public struct ObservationMasking: Sendable, Equatable {
+    /// Results older than the newest `keepExchanges` exchanges are masked.
+    public var keepExchanges: Int
+    /// Mask only once the history has reached this fraction of the compaction trigger; nil masks
+    /// from the first turn. A run that never nears the trigger is then never touched.
+    public var atPressure: Double?
+    /// The newest `read_file` result of every path stays whole whatever the other rules say: a
+    /// model that has just read a file is never shown a stub of it, so an edit does not send it
+    /// reading the same file again and again.
+    public var keepsNewestReadPerPath: Bool
+
+    public init(keepExchanges: Int = 1, atPressure: Double? = nil, keepsNewestReadPerPath: Bool = false) {
+        self.keepExchanges = keepExchanges
+        self.atPressure = atPressure
+        self.keepsNewestReadPerPath = keepsNewestReadPerPath
+    }
+}
+
 /// A tool-calling agent loop, with its stop logic declared as modifiers.
 ///
 /// ```swift
@@ -61,8 +129,8 @@ public struct AgentLoop: Pipeline {
     let systemPrompt: String
     let contextTokens: Int
     /// Per-response output cap. `nil` → don't send `max_tokens`; the server uses its own default.
-    let maxOutputTokens: Int?
-    let compaction: Bool
+    private(set) var maxOutputTokens: Int?
+    private(set) var compaction: Bool
     let enableThinking: Bool
     let reportsToolCalls: Bool
     /// Whether the model's turns keep their reasoning in the history. On only where the executor
@@ -71,6 +139,22 @@ public struct AgentLoop: Pipeline {
     ///
     /// - Author: Claude
     let replaysReasoning: Bool
+    /// Provider-specific arguments every work turn sends (``Model/parameter(_:_:)`` on the step), keyed
+    /// by their raw key — an engine's repetition penalty, say. The compaction summarizer sends them
+    /// too: it decodes as a work turn does. A forced answer turn sends none. The loop's own keys —
+    /// thinking, preserved thinking, the summarizer's call ban — are applied after them and win.
+    ///
+    /// - Author: Claude
+    private(set) var modelParameters: [String: JSONValue] = [:]
+    /// How the loop compacts. See ``CompactionOptions``.
+    private(set) var compactionOptions = CompactionOptions()
+    /// How much earlier reasoning the history keeps. See ``ReasoningRetention``.
+    private(set) var reasoningRetention = ReasoningRetention.untilPressure(2.0 / 3.0)
+    /// What the history shows of older tool results; nil shows every result whole. See ``ObservationMasking``.
+    private(set) var masking: ObservationMasking?
+    /// Whether every work turn ends with the task restated as the last user message.
+    private(set) var restatesTask = false
+
     /// When the run stops, and that it stops with an answer (see ``StopPolicy``), in the order the
     /// modifiers were applied — the first policy to name a reason for forcing an answer is the one
     /// the transcript records.
@@ -131,10 +215,10 @@ public struct AgentLoop: Pipeline {
     ///     `false` when the tools report their own calls (an ElixTools `ToolDispatcher` with an `onCall`
     ///     hook), or each call is recorded twice. A name no tool answers to is reported either way: no
     ///     tool ever sees it.
-    ///   - replaysReasoning: Keep each turn's reasoning in the history. Turn it on only for an
-    ///     executor that sends prior reasoning back to the model, such as the local one: elsewhere it
-    ///     would only fill the history budgets with text no request carries, and set off compaction
-    ///     early.
+    ///   - replaysReasoning: Keep each turn's reasoning in the history, and ask the chat template to
+    ///     keep all of it (`preserve_thinking`). Turn it on only for an executor that sends prior
+    ///     reasoning back to the model, such as the local one: elsewhere it would only fill the
+    ///     history budgets with text no request carries, and set off compaction early.
     ///   - workingDirectory: Where the run works — told to the model, which builds paths from it.
     ///   - diagnostic: Harness-interpretation notes for the transcript.
     public init(
@@ -183,6 +267,81 @@ public struct AgentLoop: Pipeline {
         modifiers, once and outside any body: as the root pipeline, or as a stored property set in \
         `init` (store the wrapping pipeline, not just the loop).
         """
+
+    // MARK: - Model arguments
+
+    /// Send `parameters` with every work turn, on top of any set before. A built-in key (`maxTokens`,
+    /// `tools`, …) has its own modifier and traps here, as it does in ``Model/parameter(_:_:)``.
+    ///
+    /// - Author: Claude
+    public func modelParameters(_ parameters: [String: JSONValue]) -> AgentLoop {
+        if ExecutionContext.isEmittingPipelineGraph { fatalError(Self.builtWhileLowering) }
+        var copy = self
+        copy.modelParameters.merge(parameters) { _, new in new }
+        return copy
+    }
+
+    /// Cap every turn's output at `tokens`, as `maxOutputTokens` at init does: the request carries it,
+    /// and the history budgets reserve that much of the window for it.
+    ///
+    /// - Author: Claude
+    public func outputTokens(_ tokens: Int) -> AgentLoop {
+        if ExecutionContext.isEmittingPipelineGraph { fatalError(Self.builtWhileLowering) }
+        var copy = self
+        copy.maxOutputTokens = tokens
+        return copy
+    }
+
+    /// Compact as `options` say. See ``CompactionOptions``.
+    ///
+    /// - Author: Claude
+    public func compacting(_ options: CompactionOptions) -> AgentLoop {
+        if ExecutionContext.isEmittingPipelineGraph { fatalError(Self.builtWhileLowering) }
+        var copy = self
+        copy.compactionOptions = options
+        return copy
+    }
+
+    /// Keep earlier reasoning in the history as `retention` says. See ``ReasoningRetention``.
+    ///
+    /// - Author: Claude
+    public func retainingReasoning(_ retention: ReasoningRetention) -> AgentLoop {
+        if ExecutionContext.isEmittingPipelineGraph { fatalError(Self.builtWhileLowering) }
+        var copy = self
+        copy.reasoningRetention = retention
+        return copy
+    }
+
+    /// Show older tool results as `masking` says. See ``ObservationMasking``.
+    ///
+    /// - Author: Claude
+    public func maskingObservations(_ masking: ObservationMasking) -> AgentLoop {
+        if ExecutionContext.isEmittingPipelineGraph { fatalError(Self.builtWhileLowering) }
+        var copy = self
+        copy.masking = masking
+        return copy
+    }
+
+    /// Never summarize the middle of the history; trimming alone keeps it under the cap.
+    ///
+    /// - Author: Claude
+    public func withoutCompaction() -> AgentLoop {
+        if ExecutionContext.isEmittingPipelineGraph { fatalError(Self.builtWhileLowering) }
+        var copy = self
+        copy.compaction = false
+        return copy
+    }
+
+    /// End every work turn's prompt with the task restated as the last user message. The history
+    /// does not carry it; only the request does.
+    ///
+    /// - Author: Claude
+    public func restatingTask() -> AgentLoop {
+        if ExecutionContext.isEmittingPipelineGraph { fatalError(Self.builtWhileLowering) }
+        var copy = self
+        copy.restatesTask = true
+        return copy
+    }
 
     // MARK: - Stop policies
 
@@ -250,6 +409,10 @@ public struct AgentLoop: Pipeline {
         + "conversation. If the task is done, reply with a one-line summary; otherwise take a "
         + "different step.)"
 
+    /// What an empty turn draws.
+    static let emptyTurnNudge = "(Your previous turn was empty. Call a tool to make progress, "
+        + "or write your final answer.)"
+
     /// The system prompt this run sends: the configured one, what the stop policies add (how to
     /// end the task, when `finish` is registered — said only then, so a host that filters the tool
     /// out never has its model told to call something it was never given), and where the run works.
@@ -280,7 +443,9 @@ public struct AgentLoop: Pipeline {
     // Keep enough recent tail to stay coherent, but leave margin so the compacted transcript lands
     // well under the trigger (head + summary + tail ≈ 0.6·trigger) and doesn't immediately re-compact.
     private var compactionTailChars: Int { compactionTrigger / 3 }
-    private var compactionSummaryTokens: Int { min(max(compactionTrigger / 12, 512), 2_048) }
+    // The summarizer's thought and its summary share this; at a 32K window it is the 8K a work turn
+    // gets, and a thought that runs long no longer eats the summary.
+    private var compactionSummaryTokens: Int { min(max(compactionTrigger / 4, 512), 8_192) }
 
     public var body: some Pipeline {
         While(reply.isEmpty && turns < maxTurns) {
@@ -294,12 +459,20 @@ public struct AgentLoop: Pipeline {
             let policies = policies
             let canFinish = finishEndsRun
             let turnNumber = turns
-            // Only with a middle to summarize: a compaction turn takes no turn from the budget, and
-            // with nothing between the opening and the tail it only adds a recap — so opening turns
-            // over the trigger on their own would compact forever. Trimming fits them instead.
+            let compacting = compactionOptions
+            let retention = reasoningRetention
+            let masking = masking
+            let trigger = compactionTrigger
+            let parameters = modelParameters
+            let task = self.task
+            // Only with a middle to summarize — an assistant turn between the opening and the tail.
+            // A compaction turn takes no turn from the budget, and a middle that holds only an
+            // earlier recap or a nudge would be summarized again and again while the kept tail,
+            // whose newest thought survives any trimming, holds the history over the trigger.
+            // Trimming fits those instead.
             let overCompactionTrigger = compaction
                 && ConversationHistory.charCount(priorHistory) > compactionTrigger
-                && !middleTurns(of: priorHistory).isEmpty
+                && middleTurns(of: priorHistory).contains { $0.role == "assistant" }
             // A forced final turn when any policy asks for one: the probe escalated, or this is
             // the budget's last turn.
             let forcedBecause = policies.lazy.compactMap { $0.forcesAnswer(turn: turns, maxTurns: maxTurns) }.first
@@ -328,9 +501,16 @@ public struct AgentLoop: Pipeline {
                 // Compaction turn: summarize the older middle, preserving task header + recent tail.
                 // No model turn happens this iteration; `reply` stays empty so the loop continues on
                 // the compacted history next time.
+                // The last summarizer turn, when it spent its whole output on its thought and
+                // said nothing, left the history as it was (see `CompactHistory`), so this
+                // iteration is the same compaction again: without thinking, the output goes to
+                // the reply.
+                let summaryWasCut = compactionSummary.reasoningTruncated && (compactionSummary.reply ?? "").isEmpty
                 Run($turns) { turns -> Int in
                     for policy in policies { await policy.reset() }
-                    diagnostic?("probe: reset for compaction")
+                    diagnostic?(summaryWasCut
+                        ? "compaction: the summary was cut off in its thought; asking again without thinking"
+                        : "probe: reset for compaction")
                     return turns
                 }
                 .assign(to: $turns)
@@ -338,28 +518,46 @@ public struct AgentLoop: Pipeline {
                     summary: $compactionSummary,
                     history: $history,
                     head: Array(priorHistory.prefix(openingTurns)),
-                    middle: ConversationHistory.render(middleTurns(of: priorHistory)),
+                    middle: compacting.factSummary
+                        ? ConversationHistory.report(middleTurns(of: priorHistory))
+                        : ConversationHistory.render(middleTurns(of: priorHistory)),
                     tail: tailTurns(of: priorHistory),
                     maxTokens: compactionSummaryTokens,
-                    enableThinking: enableThinking)
+                    enableThinking: enableThinking && !summaryWasCut,
+                    mayCall: compacting.summarizerMayCall,
+                    task: compacting.factSummary ? task : nil,
+                    parameters: parameters)
             } else {
                 // Work turn: model + tool dispatch.
                 let registry = ToolRegistry(tools)
 
                 let advertised = Model<ModelTurn>(prompt)
                     .tools(tools.map(\.descriptor))
-                // `ModelArgumentKey` has no member for this provider-specific key, so it is spelled out.
-                let base = enableThinking ? advertised : advertised.parameter("enable_thinking", false)
+                // `ModelArgumentKey` has no member for these provider-specific keys, so they are spelled out.
+                // The shared parameters first, so the loop's own keys below win over a shared one
+                // that names them.
+                let tuned = modelParameters.reduce(advertised) { step, parameter in
+                    step.parameter(ModelArgumentKey(rawValue: parameter.key), parameter.value)
+                }
+                let thinking = enableThinking ? tuned : tuned.parameter("enable_thinking", false)
+                // Replayed reasoning must also be kept by the chat template, which by its own rule
+                // keeps only the turns after the last user message — and the loop's nudges are user
+                // messages. Without this, one nudge shows the model an assistant that never thought,
+                // and it stops thinking for the rest of the run.
+                let base = replaysReasoning ? thinking.parameter("preserve_thinking", true) : thinking
                 // Apply an output cap only if one is configured; otherwise let the server decide.
-                (maxOutputTokens.map { base.maxTokens($0) } ?? base)
-                    // The snapshot, not the binding: `.priorTurns($slot)` is read from the slot
-                    // store at execution time, and a slot only exists there once something has
-                    // written it — so the FIRST turn of every run went out with no history at
-                    // all, task included. The body re-lowers after each committed write, so the
-                    // captured value is always the current one.
-                    .priorTurns(priorHistory)
-                    .input { $turnInput }
-                    .assign(to: $lastTurn)
+                let capped = maxOutputTokens.map { base.maxTokens($0) } ?? base
+                // The snapshot, not the binding: `.priorTurns($slot)` is read from the slot
+                // store at execution time, and a slot only exists there once something has
+                // written it — so the FIRST turn of every run went out with no history at
+                // all, task included. The body re-lowers after each committed write, so the
+                // captured value is always the current one.
+                let shown = capped.priorTurns(priorHistory)
+                if restatesTask {
+                    shown.message(Self.taskReminder(task)).assign(to: $lastTurn)
+                } else {
+                    shown.input { $turnInput }.assign(to: $lastTurn)
+                }
                 // Extend the history: append tool results, or — on an empty turn — a nudge so the
                 // next turn sees a different prompt and can recover. A tool-free answer turn is final
                 // and leaves the history unchanged.
@@ -367,8 +565,8 @@ public struct AgentLoop: Pipeline {
                     if let calls = turn.toolCalls, !calls.isEmpty {
                         var updated = priorHistory
                         // The assistant's own turn, as the assistant's. Where the executor sends
-                        // reasoning back (the local one hands it to the chat template, which keeps
-                        // the thinking of turns after the last user message), the turn carries it:
+                        // reasoning back (the local one hands it to the chat template, asked above
+                        // to keep every turn's thinking), the turn carries it:
                         // a model that sees an assistant which does not think stops thinking after
                         // its first call. Elsewhere it is reply and calls only.
                         updated.append(replaysReasoning
@@ -456,14 +654,17 @@ public struct AgentLoop: Pipeline {
                                             at: 0)
                         }
                         updated += guidance
+                        let pressure = Double(ConversationHistory.charCount(updated)) / Double(trigger)
+                        if let masking, masking.atPressure.map({ pressure > $0 }) ?? true {
+                            updated = ConversationHistory.maskingObservations(updated, as: masking)
+                        }
+                        let retained = ConversationHistory.retainingReasoning(updated, as: retention, pressure: pressure)
                         // Final safety net: if compaction is off or a single turn overflows, trim.
-                        return ConversationHistory.trimmed(updated, toCharacters: transcriptCap,
+                        return ConversationHistory.trimmed(retained, toCharacters: transcriptCap,
                                                            keepingFirst: openingTurns)
                     }
                     if let reply = turn.reply, !reply.isEmpty { return priorHistory }
-                    return priorHistory + [ConversationTurn(role: "user",
-                        content: "(Your previous turn was empty. Call a tool to make progress, "
-                            + "or write your final answer.)")]
+                    return priorHistory + [ConversationTurn(role: "user", content: Self.emptyTurnNudge)]
                 }
                 .assign(to: $history)
                 // Track consecutive empty turns; reset on any productive turn.
@@ -501,6 +702,13 @@ public struct AgentLoop: Pipeline {
                 .assign(to: $turns)
         }
         $reply
+    }
+
+    /// The task, restated as the last user message of a work turn.
+    ///
+    /// - Author: Claude
+    static func taskReminder(_ task: String) -> String {
+        "Reminder of the task:\n\(task)"
     }
 
     /// The system prompt of a forced final turn: report on the work, do not continue it.
@@ -707,8 +915,7 @@ public struct AgentLoop: Pipeline {
         // Capped as well as trimmed: an exchange larger than the whole tail allowance would
         // otherwise leave the history above the compaction trigger, and the loop would compact
         // the same conversation forever without ever taking a turn.
-        return ConversationHistory.fit(ConversationHistory.safeSuffix(out),
-                                       toCharacters: compactionTailChars)
+        return ConversationHistory.fit(ConversationHistory.safeSuffix(out), toCharacters: compactionTailChars)
     }
 
     /// Everything between the preserved opening and that tail — what compaction summarizes.

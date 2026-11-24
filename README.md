@@ -313,7 +313,20 @@ struct CodingAgentPipeline: Pipeline {
   carries only `ToolDescriptor`s; implementations never enter the graph.
 - **Cross-cutting concerns are sub-pipelines.** When the transcript approaches the model's context
   window, a compaction *sub-pipeline* summarizes the older middle and rewrites state in place —
-  composed into the loop, not bolted onto it.
+  composed into the loop, not bolted onto it. The tail it keeps always keeps its newest thought,
+  whatever the budget: it is the plan the next turn follows. `.compacting(_:)` chooses what the
+  summarizer reads (by default a transcript to recap; or the task with a report of calls and
+  results to pull the needed facts from, for an executor that can keep the summarizer from
+  calling) and whether its turn may open a tool call (by default not: an executor that honours
+  it bans the call grammar, so the reply is text). A summarizer turn that spent its whole output
+  on its thought and replied nothing changes nothing; the loop compacts again without thinking.
+- **A thinking model keeps seeing its newest thought.** With `replaysReasoning` (on for the local
+  executor) each assistant turn goes back with its reasoning, and every work turn asks the chat
+  template to keep it (`preserve_thinking`: the template's own rule keeps only the turns after the
+  last user message, and the loop's nudges are user messages). By default the history keeps every
+  thought until it is two thirds of the way to the compaction trigger, then the newest alone
+  (`.retainingReasoning(_:)`): the newest thought is the plan the next turn follows — without it
+  the model redoes finished steps — and the older ones are the first thing given up under pressure.
 - **Swap the whole agent behind a protocol.** The terminal UI depends only on a `ChatAgent`
   ([`ChatAgent`](CodingAgent/ChatAgent.swift)); `CodingAgentAdapter` wires this pipeline behind it,
   so another model or a remote service is a drop-in replacement.
