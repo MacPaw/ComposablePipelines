@@ -49,6 +49,36 @@ public enum ConversationHistory {
         turns.map(render).filter { !$0.isEmpty }.joined(separator: "\n\n")
     }
 
+    /// The history as a report of what was done and what came back: numbered call records, each
+    /// with its result, and the assistant's own words as notes. Nothing in it is a turn to
+    /// continue — shown the same history as a transcript (`Assistant: call read_file(…)`), a small
+    /// model carries on calling instead of describing.
+    ///
+    /// - Author: Claude
+    public static func report(_ turns: [ConversationTurn]) -> String {
+        var blocks: [String] = []
+        var number = 0
+        for exchange in exchanges(turns) {
+            guard let first = exchange.first else { continue }
+            guard first.role == "assistant" else {
+                if !first.content.isEmpty { blocks.append(first.content) }
+                continue
+            }
+            if !first.content.isEmpty { blocks.append("Note: \(first.content)") }
+            let results = exchange.dropFirst()
+            for (offset, call) in (first.toolCalls ?? []).enumerated() {
+                number += 1
+                let result = results.first { $0.toolCallID == call.id } ?? results.dropFirst(offset).first
+                let echo = call.arguments.count > 200
+                    ? String(call.arguments.prefix(200)) + "…" : call.arguments
+                var block = "Call \(number) · \(call.name)(\(echo))"
+                if let result { block += "\nreturned:\n\(result.content)" }
+                blocks.append(block)
+            }
+        }
+        return blocks.joined(separator: "\n\n")
+    }
+
     /// Rough size, used against the character budgets derived from the context window.
     /// Counts the reasoning a turn carries: an executor that replays it (the local one does) sends
     /// it with the turn, and a budget that missed it let the prompt outgrow the window unseen. All of
@@ -127,7 +157,9 @@ public enum ConversationHistory {
 
     /// Drop reasoning, then shorten turn contents, then oversized tool-call arguments, until the
     /// history fits, oldest first. Reasoning goes first because it is the cheapest to lose: what a
-    /// turn did is in its content and calls.
+    /// turn did is in its content and calls. The newest thought stays whatever the budget: a history
+    /// without a single think block shows the model an assistant that does not think, and it mirrors
+    /// that for the rest of the run.
     ///
     /// The last resort, for when dropping whole exchanges cannot help because the one that must
     /// be kept is itself over budget. Structure is preserved — every `tool` turn keeps its id and
@@ -135,10 +167,9 @@ public enum ConversationHistory {
     /// merely shorter and one the provider rejects.
     ///
     /// - Author: Claude
-    public static func fit(_ turns: [ConversationTurn],
-                           toCharacters budget: Int) -> [ConversationTurn] {
+    public static func fit(_ turns: [ConversationTurn], toCharacters budget: Int) -> [ConversationTurn] {
         guard charCount(turns) > budget else { return turns }
-        var out = droppingReasoning(turns, toCharacters: budget)
+        var out = droppingReasoning(turns, toCharacters: budget, keepingLatest: true)
         var size = charCount(out)
         let marker = "\n…[truncated]"
         // Oldest first: recent results are what the next turn reasons about.
@@ -184,6 +215,77 @@ public enum ConversationHistory {
         return out
     }
 
+    /// What a masked tool result opens with; a result that already does is left as it is.
+    static let maskedResultPrefix = "[masked: "
+
+    /// The history with its older tool results shown as `masking` says: a result older than the
+    /// newest exchanges, or a read of a path a later exchange read or wrote, becomes a one-line stub
+    /// naming its call. Applying it again changes nothing.
+    ///
+    /// - Author: Claude
+    public static func maskingObservations(_ turns: [ConversationTurn],
+                                           as masking: ObservationMasking) -> [ConversationTurn] {
+        // Exchange by exchange: a result belongs to the call with its id in its own exchange, so an
+        // id that repeats across exchanges cannot hand an older result to a newer call.
+        var callOf: [Int: (call: ToolCall, exchange: Int)] = [:]   // tool-turn index → its call
+        var pathsByExchange: [Set<String>] = []
+        var newestReadOf: [String: Int] = [:]   // path → the tool-turn index of its newest read_file result
+        var current: [String: ToolCall] = [:]
+        for (index, turn) in turns.enumerated() {
+            if turn.role == "assistant", let calls = turn.toolCalls, !calls.isEmpty {
+                current = Dictionary(calls.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+                pathsByExchange.append(Set(calls.compactMap { filePath(of: $0) }))
+            } else if turn.role == "tool", let id = turn.toolCallID, let call = current[id] {
+                callOf[index] = (call, pathsByExchange.count - 1)
+                if call.name == "read_file", let path = filePath(of: call) { newestReadOf[path] = index }
+            }
+        }
+        let exchangeCount = pathsByExchange.count
+        var out = turns
+        for index in out.indices {
+            let turn = out[index]
+            guard let (call, exchange) = callOf[index], !turn.content.hasPrefix(maskedResultPrefix) else { continue }
+            let path = filePath(of: call)
+            if masking.keepsNewestReadPerPath, call.name == "read_file", let path, newestReadOf[path] == index { continue }
+            let aged = exchange < exchangeCount - masking.keepExchanges
+            let superseded = call.name == "read_file"
+                && path.map { path in pathsByExchange[(exchange + 1)...].contains { $0.contains(path) } } ?? false
+            guard aged || superseded else { continue }
+            let lines = turn.content.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).count
+            out[index] = ConversationTurn(
+                role: "tool",
+                content: "\(maskedResultPrefix)\(call.name) returned \(lines) lines; call it again to see them]",
+                toolCallID: turn.toolCallID)
+        }
+        return out
+    }
+
+    /// The `path` argument of a file call, as the model spelled it.
+    private static func filePath(of call: ToolCall) -> String? {
+        guard ["read_file", "write_file", "edit_file"].contains(call.name),
+              let object = try? JSONSerialization.jsonObject(with: Data(call.arguments.utf8)) as? [String: Any],
+              let path = object["path"] as? String else { return nil }
+        return path
+    }
+
+    /// The history with its older reasoning kept as `retention` says. The newest thought always
+    /// stays whole: it is the plan the next turn follows.
+    ///
+    /// - Parameter pressure: How full the history is against the compaction trigger, for
+    ///   ``ReasoningRetention/untilPressure(_:)``.
+    ///
+    /// - Author: Claude
+    public static func retainingReasoning(_ turns: [ConversationTurn],
+                                          as retention: ReasoningRetention,
+                                          pressure: Double) -> [ConversationTurn] {
+        switch retention {
+        case .all:
+            return turns
+        case .untilPressure(let fraction):
+            return pressure > fraction ? droppingReasoning(turns, toCharacters: 0, keepingLatest: true) : turns
+        }
+    }
+
     /// Removes reasoning, oldest turn first, until the history fits or none is left. The first
     /// thing both ``trimmed(_:toCharacters:keepingFirst:)`` and ``fit(_:toCharacters:)`` give up.
     ///
@@ -215,6 +317,12 @@ public enum ConversationHistory {
 /// speaking about the conversation, and attributing it to the model would be the same mistake
 /// the flat transcript made.
 ///
+/// A summarizer that thinks can spend its whole output on the thought and say nothing — on a
+/// failing-test transcript it debugs the test instead of listing facts, to the cap. Such a turn
+/// (thought cut off, no reply) with thinking on leaves the history as it was, so the loop
+/// compacts again; ``AgentLoop`` then asks without thinking, and that reply is taken whatever it
+/// is. With thinking off an empty reply is taken too, so a retry is one.
+///
 /// - Author: Claude
 public struct CompactHistory: Pipeline {
     public typealias Output = [ConversationTurn]
@@ -226,12 +334,22 @@ public struct CompactHistory: Pipeline {
     let tail: [ConversationTurn]
     let maxTokens: Int
     let enableThinking: Bool
+    /// The task the recap serves. Given, the summarizer is asked for the facts in `middle` that the
+    /// task still needs, and `middle` should be a ``ConversationHistory/report(_:)``; `nil` asks for
+    /// a recap of `middle` as a transcript.
+    let task: String?
+    /// Provider-specific arguments the summarizer's turn sends, as a work turn's do; its own thinking
+    /// and call keys are applied after them and win.
+    let parameters: [String: JSONValue]
+    /// Whether the summarizer's turn may open a tool call; `false` sends `tool_calls: false`.
+    let mayCall: Bool
 
     /// - Parameter enableThinking: Same meaning as ``AgentLoop``'s — a caller that turned
     ///   thinking off for its turns gets it off for the summary too.
     public init(summary: Binding<ModelTurn>, history: Binding<[ConversationTurn]>,
                 head: [ConversationTurn], middle: String, tail: [ConversationTurn],
-                maxTokens: Int, enableThinking: Bool = true) {
+                maxTokens: Int, enableThinking: Bool = true, mayCall: Bool = true,
+                task: String? = nil, parameters: [String: JSONValue] = [:]) {
         self.summary = summary
         self.history = history
         self.head = head
@@ -239,6 +357,9 @@ public struct CompactHistory: Pipeline {
         self.tail = tail
         self.maxTokens = maxTokens
         self.enableThinking = enableThinking
+        self.mayCall = mayCall
+        self.task = task
+        self.parameters = parameters
     }
 
     private static let prompt = """
@@ -247,13 +368,31 @@ public struct CompactHistory: Pipeline {
         tool results needed to continue the task. Output only the summary.
         """
 
+    /// The prompt for a given task: the reply is a list of facts, not a summary. It says what the
+    /// reply is for, because a recap written without the task is about the files, not the question.
+    private static let factsPrompt = """
+        You are compacting part of an agent's transcript so the agent can go on with its task in a \
+        smaller context window. You are given the task and the part being compacted. Reply with the \
+        facts in that part which the task still needs — identifiers, names, dates, amounts, file \
+        paths and line numbers — each quoted exactly as the excerpt has it, one per line, with the \
+        file it came from. Leave out what the excerpt shows only in passing. The reply replaces the \
+        excerpt in the agent's history, so it says nothing about this instruction or about compaction.
+        """
+
     public var body: some Pipeline {
-        let model = Model<ModelTurn>(Self.prompt)
-        (enableThinking ? model : model.parameter("enable_thinking", false))
+        let prompt = task == nil ? Self.prompt : Self.factsPrompt
+        let model = Model<ModelTurn>(prompt)
+        let tuned = parameters.reduce(model) { step, parameter in
+            step.parameter(ModelArgumentKey(rawValue: parameter.key), parameter.value)
+        }
+        let thinking = enableThinking ? tuned : tuned.parameter("enable_thinking", false)
+        let callable = mayCall ? thinking : thinking.parameter("tool_calls", false)
+        callable
             .maxTokens(maxTokens)
-            .message(middle)
+            .message(task.map { "Task: \($0)\n\nThe part of the transcript being compacted:\n\n" + middle } ?? middle)
             .assign(to: summary)
-        Run(summary) { turn -> [ConversationTurn] in
+        Run(summary, history) { turn, unchanged -> [ConversationTurn] in
+            if enableThinking, turn.reasoningTruncated, (turn.reply ?? "").isEmpty { return unchanged }
             // An empty summarizer turn degrades to keeping head + tail (no crash).
             let recap = ConversationTurn(
                 role: "user",

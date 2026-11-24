@@ -43,10 +43,10 @@ public struct CodingAgentPipeline: Pipeline {
     ///     `false` when the tools report their own calls (an ElixTools `ToolDispatcher` with an `onCall`
     ///     hook), or each call is recorded twice. A name no tool answers to is reported either way: no
     ///     tool ever sees it.
-    ///   - replaysReasoning: Keep each turn's reasoning in the history. Turn it on only for an
-    ///     executor that sends prior reasoning back to the model, such as the local one: elsewhere it
-    ///     would only fill the history budgets with text no request carries, and set off compaction
-    ///     early.
+    ///   - replaysReasoning: Keep each turn's reasoning in the history, and ask the chat template to
+    ///     keep all of it (`preserve_thinking`). Turn it on only for an executor that sends prior
+    ///     reasoning back to the model, such as the local one: elsewhere it would only fill the
+    ///     history budgets with text no request carries, and set off compaction early.
     ///   - jail: The run's working directory, which the model is told.
     public init(
         task: String,
@@ -96,6 +96,55 @@ public struct CodingAgentPipeline: Pipeline {
     /// - Author: Claude
     public func stopping(_ policy: any StopPolicy) -> CodingAgentPipeline {
         CodingAgentPipeline(loop: loop.stopping(policy))
+    }
+
+    /// See ``AgentLoop/modelParameters(_:)``.
+    ///
+    /// - Author: Claude
+    public func modelParameters(_ parameters: [String: JSONValue]) -> CodingAgentPipeline {
+        CodingAgentPipeline(loop: loop.modelParameters(parameters))
+    }
+
+    /// See ``AgentLoop/outputTokens(_:)``.
+    ///
+    /// - Author: Claude
+    public func outputTokens(_ tokens: Int) -> CodingAgentPipeline {
+        CodingAgentPipeline(loop: loop.outputTokens(tokens))
+    }
+
+    /// See ``AgentLoop/compacting(_:)``.
+    ///
+    /// - Author: Claude
+    public func compacting(_ options: CompactionOptions) -> CodingAgentPipeline {
+        CodingAgentPipeline(loop: loop.compacting(options))
+    }
+
+    /// See ``AgentLoop/retainingReasoning(_:)``.
+    ///
+    /// - Author: Claude
+    public func retainingReasoning(_ retention: ReasoningRetention) -> CodingAgentPipeline {
+        CodingAgentPipeline(loop: loop.retainingReasoning(retention))
+    }
+
+    /// See ``AgentLoop/maskingObservations(_:)``.
+    ///
+    /// - Author: Claude
+    public func maskingObservations(_ masking: ObservationMasking) -> CodingAgentPipeline {
+        CodingAgentPipeline(loop: loop.maskingObservations(masking))
+    }
+
+    /// See ``AgentLoop/withoutCompaction()``.
+    ///
+    /// - Author: Claude
+    public func withoutCompaction() -> CodingAgentPipeline {
+        CodingAgentPipeline(loop: loop.withoutCompaction())
+    }
+
+    /// See ``AgentLoop/restatingTask()``.
+    ///
+    /// - Author: Claude
+    public func restatingTask() -> CodingAgentPipeline {
+        CodingAgentPipeline(loop: loop.restatingTask())
     }
 
     /// The prompt for ``defaultCodingTools(jail:bashTimeout:research:)``.
